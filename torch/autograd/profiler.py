@@ -8,6 +8,18 @@ import itertools
 from collections import defaultdict, namedtuple
 
 
+class range(object):
+    def __init__(self, name):
+        self.name = name
+
+    def __enter__(self):
+        torch.autograd._push_range(self.name)
+
+    def __exit__(self, *args):
+        torch.autograd._pop_range()
+        return False
+
+
 class EventList(list):
     """A list of Events (for pretty printing)"""
     def __init__(self, *args, **kwargs):
@@ -17,21 +29,77 @@ class EventList(list):
         return self.table()
 
     def table(self, sort_by=None):
+        """Prints an EventList as a nicely formatted table.
+
+        Arguments:
+            sort_by (str, optional): Attribute used to sort entries. By default
+                they are printed in the same order as they were registered.
+                Valid keys include: ``cpu_time``, ``cuda_time``, ``cpu_time_total``,
+                ``cuda_time_total``, ``count``.
+
+        Returns:
+            A string containing the table.
+        """
         return build_table(self, sort_by)
+
+    def export_chrome_trace(self, path):
+        """Exports an EventList as a Chrome tracing tools file.
+
+        The checkpoint can be later loaded and inspected under ``chrome://tracing`` URL.
+
+        Arguments:
+            path (str): Path where the trace will be written.
+        """
+        import json
+        with open(path, 'w') as f:
+            chrome_events = []
+            for evt in self:
+                chrome_events.append(dict(
+                    name=evt.name,
+                    ph='X',
+                    ts=evt.start / 1000,
+                    dur=evt.cpu_time_total / 1000,
+                    tid='Autograd functions',
+                    pid='Autograd functions',
+                    args={},
+                ))
+            json.dump(chrome_events, f)
+
+    def key_averages(self):
+        """Averages all function events over their keys.
+
+        Returns:
+            An EventList containing FunctionEventAvg objects.
+        """
+        stats = defaultdict(FunctionEventAvg)
+        for evt in self:
+            stats[evt.key] += evt
+        return EventList(stats.values())
+
+    def total_average(self):
+        """Averages all events.
+
+        Returns:
+            A FunctionEventAvg object.
+        """
+        total_stat = FunctionEventAvg()
+        for evt in self:
+            total_stat += evt
+            total_stat.key = None
+        total_stat.key = 'Total'
+        return total_stat
 
 
 class profile(object):
     """Context manager that manages autograd profiler state and holds a summary of results.
 
     Arguments:
-        use_nvprof (bool, optional): If True, uses nvprof (might incur high overhead and
-            assumes that the whole process is running inside nvprof), otherwise uses a custom
-            CPU-only profiler (with negligible overhead). Default: False.
-        trace_path (str, optional): A path of the CUDA checkpoint. If specified, it will be left
-            unmodified after profiling finishes, so it can be opened and inspected in nvvp. Otherwise
-            it will be created in a temporary directory and removed after reading the results.
         enabled (bool, optional): Setting this to False makes this context manager a no-op.
-            Default: True.
+            Default: ``True``.
+
+    .. warning:
+        This context managers should not be called recursively, i.e. at most one
+        instance should be enabled at any given time.
 
     Example:
         >>> x = Variable(torch.randn(1, 1), requires_grad=True)
@@ -53,31 +121,12 @@ class profile(object):
         N5torch8autograd5CloneE                        4.088us          0.000us
     """
 
-    def __init__(self, use_nvprof=False, trace_path=None, enabled=True):
+    def __init__(self, enabled=True):
         self.enabled = enabled
         self.function_events = None
         if not self.enabled:
             return
         self.entered = False
-        self.use_nvprof = use_nvprof
-        if use_nvprof:
-            if trace_path is None:
-                # The file will be deleted in the destructor
-                with tempfile.NamedTemporaryFile(delete=False) as f:
-                    self.delete_trace = True
-                    self.trace_path = f.name
-            else:
-                self.trace_path = trace_path
-                self.delete_trace = False
-        else:
-            self.trace_path = None
-            self.delete_trace = False
-
-    def __del__(self):
-        if not self.enabled:
-            return
-        if self.delete_trace:
-            os.unlink(trace_path)
 
     def __enter__(self):
         if not self.enabled:
@@ -85,19 +134,14 @@ class profile(object):
         if self.entered:
             raise RuntimeError("autograd profiler traces are not reentrant")
         self.entered = True
-        if self.use_nvprof:
-            torch.cuda.profiler.initialize()
-        torch.autograd._enable_profiler(self.use_nvprof)
+        torch.autograd._enable_profiler(False)
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         if not self.enabled:
             return
         records = torch.autograd._disable_profiler()
-        if self.use_nvprof:
-            self.function_events = EventList(parse_nvprof_trace(self.used_cuda_path))
-        else:
-            self.function_events = EventList(parse_cpu_trace(records))
+        self.function_events = EventList(parse_cpu_trace(records))
         return False
 
     def __repr__(self):
@@ -110,58 +154,88 @@ class profile(object):
             return '<unfinished torch.autograd.profile>'
         return str(self.function_events)
 
-    def export_chrome_trace(self, path):
-        """Exports a list of FunctionEvents as Chrome trace.
-
-        The checkpoint can be later loaded and inspected under ``chrome://tracing`` URL.
-
-        Arguments:
-            path (str): Path where the trace will be written.
-        """
+    def table(self, sort_by=None):
         if self.function_events is None:
             raise RuntimeError("can't export a trace that didn't finish running")
-        import json
-        with open(path, 'w') as f:
-            chrome_events = []
-            for evt in self.function_events:
-                chrome_events.append(dict(
-                    name=evt.name,
-                    ph='X',
-                    ts=evt.start / 1000,
-                    dur=evt.cpu_time_total / 1000,
-                    tid='Autograd functions',
-                    pid='Autograd functions',
-                    args={},
-                ))
-            json.dump(chrome_events, f)
+        return self.function_events.table(sort_by)
+    table.__doc__ = EventList.table.__doc__
+
+    def export_chrome_trace(self, path):
+        if self.function_events is None:
+            raise RuntimeError("can't export a trace that didn't finish running")
+        return self.function_events.export_chrome_trace(path)
+    export_chrome_trace.__doc__ = EventList.export_chrome_trace.__doc__
 
     def key_averages(self):
-        """Averages all function events over their keys.
-
-        Returns:
-            A list of FunctionEventAvg objects.
-        """
         if self.function_events is None:
-            raise RuntimeError("can't export a trace that didn't finish running")
-        stats = defaultdict(FunctionEventAvg)
-        for evt in self.function_events:
-            stats[evt.key] += evt
-        return EventList(stats.values())
+            raise RuntimeError("can't average a trace that didn't finish running")
+        return self.function_events.key_averages()
+    key_averages.__doc__ = EventList.key_averages.__doc__
 
     def total_average(self):
-        """Averages all events.
-
-        Returns:
-            A FunctionEventAvg object.
-        """
         if self.function_events is None:
-            raise RuntimeError("can't export a trace that didn't finish running")
-        total_stat = FunctionEventAvg()
-        for evt in self.function_events:
-            total_stat += evt
-            total_stat.key = None
-        total_stat.key = 'Total'
-        return total_stat
+            raise RuntimeError("can't average a trace that didn't finish running")
+        return self.function_events.total_average()
+    total_average.__doc__ = EventList.total_average.__doc__
+
+
+class emit_nvtx(object):
+    """Context manager that makes every autograd operation emit an NVTX range.
+
+    It is useful when running the program under nvprof::
+
+        nvprof --profile-from-start off -o trace_name.prof -- <regular command here>
+
+    Unfortunately, there's no way to force nvprof to flush the data it collected
+    to disk, so for CUDA profiling one has to use this context manager to annotate
+    nvprof traces and wait for the process to exit before inspecting them.
+    Then, either NVIDIA Visual Profiler (nvvp) can be used to visualize the timeline, or
+    :func:`torch.autograd.profiler.load_nvprof` can load the results for inspection
+    e.g. in Python REPL.
+
+    .. warning:
+        This context manager should not be called recursively, i.e. at most one
+        instance should be enabled at any given time.
+
+    Arguments:
+        enabled (bool, optional): Setting this to False makes this context manager a no-op.
+            Default: ``True``.
+
+    Example:
+        >>> with torch.cuda.profiler.profile():
+        ...     model(x) # Warmup CUDA memory allocator and profiler
+        ...     with torch.autograd.profiler.emit_nvtx():
+        ...         model(x)
+    """
+    def __init__(self, enabled=True):
+        self.enabled = True
+        self.entered = False
+
+    def __enter__(self):
+        if not self.enabled:
+            return
+        if self.entered:
+            raise RuntimeError("NVTX annotation context manager is not reentrant")
+        self.entered = True
+        torch.cuda.synchronize()
+        torch.autograd._enable_profiler(True)
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if not self.enabled:
+            return
+        torch.cuda.synchronize()
+        torch.autograd._disable_profiler()
+        return False
+
+
+def load_nvprof(path):
+    """Opens an nvprof trace file and parses autograd annotations.
+
+    Arguments:
+        path (str): path to nvprof trace
+    """
+    return EventList(parse_nvprof_trace(path))
 
 
 ################################################################################

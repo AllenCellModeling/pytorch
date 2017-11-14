@@ -1,5 +1,6 @@
 import sys
 import os
+import re
 import argparse
 import unittest
 import warnings
@@ -116,12 +117,13 @@ def is_iterable(obj):
     try:
         iter(obj)
         return True
-    except:
+    except TypeError:
         return False
 
 
 class TestCase(unittest.TestCase):
     precision = 1e-5
+    maxDiff = None
 
     def setUp(self):
         torch.manual_seed(SEED)
@@ -169,6 +171,9 @@ class TestCase(unittest.TestCase):
         return x, y
 
     def assertEqual(self, x, y, prec=None, message=''):
+        if isinstance(prec, str) and message == '':
+            message = prec
+            prec = None
         if prec is None:
             prec = self.precision
 
@@ -209,7 +214,7 @@ class TestCase(unittest.TestCase):
             try:
                 self.assertLessEqual(abs(x - y), prec, message)
                 return
-            except:
+            except (TypeError, AssertionError):
                 pass
             super(TestCase, self).assertEqual(x, y, message)
 
@@ -241,7 +246,7 @@ class TestCase(unittest.TestCase):
             try:
                 self.assertGreaterEqual(abs(x - y), prec, message)
                 return
-            except:
+            except (TypeError, AssertionError):
                 pass
             super(TestCase, self).assertNotEqual(x, y, message)
 
@@ -316,6 +321,12 @@ class TestCase(unittest.TestCase):
                     ("I got this output for {}:\n\n{}\n\n"
                      "No expect file exists; to accept the current output, run:\n"
                      "python {} {} --accept").format(munged_id, s, __main__.__file__, munged_id))
+
+        # a hack for JIT tests
+        if sys.platform == 'win32':
+            expected = re.sub(r'CppOp\[(.+?)\]', 'CppOp[]', expected)
+            s = re.sub(r'CppOp\[(.+?)\]', 'CppOp[]', s)
+
         if ACCEPT:
             if expected != s:
                 return accept_output("updated output")

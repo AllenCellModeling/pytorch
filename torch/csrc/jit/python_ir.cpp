@@ -1,3 +1,5 @@
+#include <Python.h>
+
 #include "torch/csrc/jit/ir.h"
 #include "torch/csrc/jit/pybind.h"
 #include "torch/csrc/jit/python_tracer.h"
@@ -19,10 +21,15 @@ void initPythonIRBindings(PyObject * module_) {
       ss << g;
       return ss.str();
     })
-    .GS(inputs)
-    .GS(outputs)
+    .def("inputs",[](Graph &g) {
+      return py::make_iterator(g.inputs().begin(), g.inputs().end());
+    })
+    .def("outputs",[](Graph &g) {
+      return py::make_iterator(g.outputs().begin(), g.outputs().end());
+    })
+    // TODO: Iterator invalidation might make this hazardous
     .def("nodes",[](Graph &g) {
-      return py::make_iterator(g.nodes().begin(),g.nodes().end());
+      return py::make_iterator(g.begin(), g.end());
     })
     .def("addInput",[](Graph &g) { return g.addInput(); })
     .GS(advanceStage)
@@ -73,9 +80,14 @@ void initPythonIRBindings(PyObject * module_) {
     .NS(uniqueName)
     .NS(setStage)
     .NS(stage)
-    .NS(inputs)
-    .NS(input)
-    .NS(outputs)
+    .def("inputs",[](Node &n) {
+      return py::make_iterator(n.inputs().begin(), n.inputs().end());
+    })
+    // NB: outputs on Node returns a COPY.  So we better not make_iterator
+    // on a temporary!
+    .def("outputs",[](Node &n) { return n.outputs(); })
+    .def("input",[](Node &n) { return n.input(); })
+    .def("input",[](Node &n, size_t i) { return n.input(i); })
     .NS(offset)
     .NS(uses)
     .NS(addInput)
@@ -89,7 +101,7 @@ void initPythonIRBindings(PyObject * module_) {
     .NS(removeInput)
     .NS(removeAllInputs)
     .NS(destroy)
-    .def("typeAs", [](Node * node, Node * other) {
+    .def("setTypeAs", [](Node * node, Node * other) {
       node->setType(other->typeOption());
       return node;
     })
@@ -120,6 +132,21 @@ void initPythonIRBindings(PyObject * module_) {
     .CREATE_ACCESSOR(Graph,g)
     .CREATE_ACCESSOR(Graphs,gs)
 #undef CREATE_ACCESSOR
+    .def("z_",[](Node & n, const char * name, at::Tensor v) {
+        return n.t_(stringToSymbol(name), std::move(v.view({})));
+    })
+    .def("z",[](Node & n, const char * name) {
+        return n.t(stringToSymbol(name));
+    })
+    .def("zs_",[](Node & n, const char * name, TensorsAttr::ValueType v) {
+        for (size_t i = 0; i < v.size(); ++ i) {
+            v[i] = v[i].view({});
+        }
+        return n.ts_(stringToSymbol(name), std::move(v));
+    })
+    .def("zs",[](Node & n, const char * name) {
+        return n.ts(stringToSymbol(name));
+    })
     .def("pyobj",[](Node & n) {
       return py::handle(n.expect<PythonOp>()->pyobj.get()).cast<py::object>();
     })
@@ -157,7 +184,7 @@ void initPythonIRBindings(PyObject * module_) {
       TYPE_ELSEIF(TensorType)
         return "TensorType";
       TYPE_END()
-      jit::barf("unknown type kind");
+      torch::barf("unknown type kind");
       return "";
     })
     .def("sizes",[](Type& t) {
@@ -180,6 +207,9 @@ void initPythonIRBindings(PyObject * module_) {
 
   m.def("_jit_get_graph", [](tracer::TracingState* s) {
     return s->graph;
+  });
+  m.def("_jit_is_tracing", [](const autograd::Variable& var) {
+    return tracer::isTracing(var);
   });
 }
 }}

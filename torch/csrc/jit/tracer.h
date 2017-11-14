@@ -2,7 +2,7 @@
 
 #include "torch/csrc/jit/ir.h"
 #include "torch/csrc/jit/tracer_state.h"
-#include "torch/csrc/jit/assert.h"
+#include "torch/csrc/assertions.h"
 #include "torch/csrc/utils/functional.h"
 #include "torch/csrc/autograd/function_hook.h"
 #include "torch/csrc/autograd/variable.h"
@@ -60,11 +60,32 @@ inline std::vector<VariableFlags> getVarFlags(const variable_list& vars) {
 // Should a function which takes 'vars' as inputs be traced?
 // It sufficies for ONE variable to be tracing: any "untraced" variables
 // are treated as constants.
-inline bool isTracing(const variable_list& vars) {
+//
+// TODO: This code lives in the hotpath; make sure it is fast
+inline bool isTracing(const Variable& var) {
+  if (!var.defined() || !var.tracing_state()) return false;
+  return std::any_of(var.tracing_state()->begin(), var.tracing_state()->end(), detail::isElemActive);
+}
+
+inline bool isTracing(std::initializer_list<Variable> vars) {
+  // Reference to avoid refcount bump
   for (auto& var : vars) {
-    if (!var.defined() || !var.tracing_state()) continue;
-    if (std::any_of(var.tracing_state()->begin(), var.tracing_state()->end(), detail::isElemActive))
-      return true;
+    if (isTracing(var)) return true;
+  }
+  return false;
+}
+
+inline bool isTracing(const at::ArrayRef<Variable>& vars) {
+  // Reference to avoid refcount bump
+  for (const Variable& var : vars) {
+    if (isTracing(var)) return true;
+  }
+  return false;
+}
+
+inline bool isTracing(const at::TensorList& vars) {
+  for (const auto & var_t : vars) {
+    if (isTracing(static_cast<const Variable&>(var_t))) return true;
   }
   return false;
 }
@@ -177,7 +198,7 @@ inline std::shared_ptr<TracingState> enter(std::vector<TraceInput>&& trace_input
     }
   }
   // TODO: this might not work with the way we handle buffers
-  state->var_flags[0] = detail::getVarFlags(inputs);
+  state->var_flags[0].first = detail::getVarFlags(inputs);
   state->active = true;
   state->inputs = inputs;
   return state;
@@ -191,6 +212,7 @@ inline void _exit(const std::shared_ptr<TracingState>& state, const variable_lis
     state->graph->registerOutput(getValueTrace(state, output, true));
   }
   state->active = false;
+  state->var_flags[state->graph->stage()].second = detail::getVarFlags(outputs);
 }
 
 // Marks a backwards subgraph that should be traced as the next stage.
@@ -232,5 +254,7 @@ inline bool VariableFlags::verify(const Variable& var) {
   if (!var.defined()) return was_null;
   return !was_null && requires_grad == var.requires_grad() && is_volatile == var.is_volatile();
 }
+
+Node* recordTrace(std::string op, at::ArrayRef<Variable> inputs, at::ArrayRef<Variable> outputs);
 
 }}} // namespace torch::jit::tracer

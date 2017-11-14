@@ -1,9 +1,5 @@
 #pragma once
 
-// TODO: Remove Python dependency with layer of indirection
-
-#include <Python.h>
-
 #include <iostream>
 #include <memory>
 #include <vector>
@@ -18,10 +14,11 @@
 #include "torch/csrc/utils/object_ptr.h"
 #include "torch/csrc/utils/auto_gpu.h"
 #include "torch/csrc/utils/disallow_copy.h"
+#include "torch/csrc/utils/python_stub.h"
 
 #include "ATen/ArrayRef.h"
 #include "torch/csrc/jit/generic_if.h"
-#include "torch/csrc/jit/assert.h"
+#include "torch/csrc/assertions.h"
 #include "torch/csrc/jit/interned_strings.h"
 #include "torch/csrc/jit/attributes.h"
 #include "torch/csrc/jit/resource_guard.h"
@@ -63,6 +60,15 @@ static inline bool operator==(const Use & a, const Use & b) {
 // Graph holds a list of parameters.
 struct Param;
 
+// SourceLocation represents source code-level debug information for a node.
+// It contains a Python stack trace that represents the provenance of a given
+// node in the trace.
+struct SourceLocation {
+  SourceLocation(std::string python_traceback)
+  : python_traceback(std::move(python_traceback)) {}
+  std::string python_traceback;
+};
+
 // the list types are intentionally simple, but we type-def
 // them here so if we need to change them, refactoring will be easier
 using node_list = std::vector<Node*>;
@@ -89,6 +95,7 @@ struct Node : public Attributes<Node> {
   TH_DISALLOW_COPY_AND_ASSIGN(Node);
   friend struct Graph;
   friend graph_node_list;
+  friend const_graph_node_list;
   friend graph_node_list_iterator;
   friend const_graph_node_list_iterator;
 private:
@@ -115,6 +122,7 @@ private:
   size_t unique_ = 0;          // unique id
   size_t stage_ = 0;           // 0-forward, 1-backward, 2-double-backward,...
   std::string debug_name_;
+  std::shared_ptr<SourceLocation> source_location_;
 protected:
   TypePtr type_;
   Node(Graph * graph_, NodeKind kind_); //defined after graph
@@ -152,7 +160,17 @@ public:
   const std::string & debugName() const {
     return debug_name_;
   }
-  Graph * owningGraph() const {
+  Node* setSourceLocation(std::shared_ptr<SourceLocation> sl) {
+    source_location_ = sl;
+    return this;
+  }
+  std::shared_ptr<SourceLocation> getSourceLocation() const {
+    return source_location_;
+  }
+  Graph * owningGraph() {
+    return graph_;
+  }
+  const Graph * owningGraph() const {
     return graph_;
   }
   size_t unique() const {
@@ -170,20 +188,54 @@ public:
   size_t stage() const {
     return stage_;
   }
-  const std::vector<Node*>& inputs() const {
+  // NB: This returns an ArrayRef; that means that it will
+  // get invalidated if you resize inputs (e.g., using addInput)
+  // We can't return a std::vector<Node*>& because there's no
+  // way to soundly cast to std::vector<const Node*> (an insane
+  // implementation of std::vector could make this representationally
+  // different.)
+  at::ArrayRef<Node*> inputs() {
     return inputs_;
+  }
+  at::ArrayRef<const Node*> inputs() const {
+    // Vectors are not convertible in const-ness of elements, but
+    // raw pointers are.
+    return {inputs_.data(), inputs_.size()};
   }
   // lots of things like select/chunk have a single input, so we have a
   // helper to make accessing it easier
-  Node * input() const {
+  Node * input() {
     JIT_ASSERT(inputs_.size() == 1);
     return inputs_.at(0);
+  }
+  const Node * input() const {
+    JIT_ASSERT(inputs_.size() == 1);
+    return inputs_.at(0);
+  }
+  // Access a particular input.  This is a checked index.
+  Node * input(size_t i) {
+    return inputs_.at(i);
+  }
+  const Node * input(size_t i) const {
+    return inputs_.at(i);
   }
   // this is a function helps handle
   // single and multi-return nodes in a consistent way
   // it also provides a layer of abstraction if we
   // ever need to change the way we represent multiple outputs
-  node_list outputs() {
+  //
+  // WARNING: this returns a COPY of the outputs, so editing
+  // this vector isn't going to do anything.
+  std::vector<const Node*> outputs() const {
+    if(!hasMultipleOutputs())
+      return { this };
+    std::vector<const Node*> r;
+    r.reserve(uses().size());
+    for(auto & u : uses())
+      r.push_back(u.user);
+    return r;
+  }
+  std::vector<Node*> outputs() {
     if(!hasMultipleOutputs())
       return { this };
     std::vector<Node*> r;
@@ -197,6 +249,7 @@ public:
   size_t offset() const {
     return size_t(i(kOffset));
   }
+  // TODO: make this more const correct
   const use_list & uses() const {
     return uses_;
   }
@@ -223,6 +276,7 @@ public:
   // Result:  %3 = f(%1, %2, %4)
   Node* addInput(Node * node) {
     JIT_ASSERT(graph_ == node->graph_);
+    assertValidInput(node);
     node->uses_.emplace_back(this, inputs_.size());
     inputs_.push_back(node);
     return node;
@@ -236,6 +290,7 @@ public:
   // Result:  %3 = f(%1, %4)
   Node * replaceInput(size_t i, Node * newValue) {
     JIT_ASSERT(newValue->graph_ == graph_);
+    assertValidInput(newValue);
     Node * old = dropInput(i);
     inputs_[i] = newValue;
     newValue->uses_.emplace_back(this, i);
@@ -394,6 +449,8 @@ public:
   // template variable, returning nullptr if the cast is invalid..
   //
   // Example usage: if(auto s = n.cast<Select>()) { ... }
+  //
+  // TODO: Make this const correct
   template<typename T>
   T* cast() {
     if(T::Kind == kind())
@@ -416,6 +473,17 @@ private:
     auto use_it = std::find(input_uses.begin(), input_uses.end(), Use(this, i));
     JIT_ASSERT(use_it != input_uses.end());
     return use_it;
+  }
+
+  // Enforce the select invariant on inputs
+  void assertValidInput(const Node *node) const {
+    if (kind_ == kSelect) {
+      // You have no excuse for not having accurate type information on
+      // multi-return
+      JIT_ASSERT(node->hasType() && node->type()->kind() == TypeKind::MultiType);
+    } else {
+      JIT_ASSERT(!node->hasType() || node->type()->kind() != TypeKind::MultiType);
+    }
   }
 
   // remove the use of input i, this sets input i to nullptr, but
@@ -463,6 +531,7 @@ protected:
   virtual void cloneFrom(Node * s) {
     if (s->hasType()) setType(s->type());
     setDebugName(s->debugName());
+    setSourceLocation(s->getSourceLocation());
     copyAttributes(*s);
   }
 };
@@ -494,19 +563,55 @@ public:
   , new_node_stage_(0)
   , output_(initOutput(create(kReturn))) {}
 
-  const param_list & inputs() {
+  at::ArrayRef<Node*> inputs() {
     return inputs_;
   }
-  const node_list & outputs() {
+  at::ArrayRef<const Node*> inputs() const {
+    return {inputs_.data(), inputs_.size()};
+  }
+  at::ArrayRef<Node*> outputs() {
     return output_->inputs();
+  }
+  at::ArrayRef<const Node*> outputs() const {
+    return static_cast<const Node*>(output_)->inputs();
   }
   graph_node_list nodes() {
     return graph_node_list(output_, kNextDirection);
   }
-  const graph_node_list nodes() const {
-    return graph_node_list(output_, kNextDirection);
+  const_graph_node_list nodes() const {
+    return const_graph_node_list(output_, kNextDirection);
+  }
+  // These invocations of begin() on output of function are OK
+  // because graph_node_list is non-owning, so it doesn't matter
+  // if it immediately dies after the invocation.
+  graph_node_list_iterator begin() {
+    return nodes().begin();
+  }
+  const_graph_node_list_iterator begin() const {
+    return nodes().begin();
+  }
+  graph_node_list_iterator end() {
+    return nodes().end();
+  }
+  const_graph_node_list_iterator end() const {
+    return nodes().end();
+  }
+  graph_node_list_iterator rbegin() {
+    return nodes().rbegin();
+  }
+  const_graph_node_list_iterator rbegin() const {
+    return nodes().rbegin();
+  }
+  graph_node_list_iterator rend() {
+    return nodes().rend();
+  }
+  const_graph_node_list_iterator rend() const {
+    return nodes().rend();
   }
   Node * return_node() {
+    return output_;
+  }
+  const Node * return_node() const {
     return output_;
   }
 
@@ -621,14 +726,20 @@ public:
   // Checks well-formedness and invariants of graph
   void lint() const;
   // for use in debugger
-  void dump();
+  void dump() const;
 
   ~Graph() {
     for (const Node * n : all_nodes)
       delete n;
   }
 
-  friend std::ostream& operator<<(std::ostream & out, Graph & g);
+  std::string toString() const {
+    std::ostringstream oss;
+    oss << *this;
+    return oss.str();
+  }
+
+  friend std::ostream& operator<<(std::ostream & out, const Graph & g);
 
 private:
 
@@ -717,9 +828,9 @@ inline Node* Node::makeMultireturn() {
   IR_END()
 */
 
-std::ostream& operator<<(std::ostream & out, Graph & g);
+std::ostream& operator<<(std::ostream & out, const Graph & g);
 std::ostream& operator<<(std::ostream & out, const Type & t);
-std::ostream& operator<<(std::ostream & out, Node & t);
+std::ostream& operator<<(std::ostream & out, const Node & t);
 
 /************* All nodes not required to be defined before Graph **************/
 
@@ -743,7 +854,7 @@ struct PythonOp : public Node {
 
   // The Python object which contains the implementation of this function.
   // This is either a class (non-legacy) or an object (legacy).  See
-  // TraceInterpreter for execution semantics.
+  // TraceInterpreterState for execution semantics.
   THPObjectPtr pyobj;
   // The calling convention for the Python function.
   // 's' -- python scalar argument
@@ -753,19 +864,8 @@ struct PythonOp : public Node {
   // Scalar arguments to the Python function.  Not necessarily passed to
   // the function in this order; see cconv for the correct order.
   std::vector<THPObjectPtr> scalar_args;
-  std::string name();
-  virtual void cloneFrom(Node * other_) override {
-    Node::cloneFrom(other_);
-    auto other = other_->cast<PythonOp>();
-    this->cconv = other->cconv;
-    this->is_legacy = other->is_legacy;
-    Py_INCREF(other->pyobj.get());
-    this->pyobj = THPObjectPtr(other->pyobj.get());
-    for(auto & sa : other->scalar_args) {
-      Py_INCREF(sa.get());
-      this->scalar_args.emplace_back(sa.get());
-    }
-  }
+  std::string name() const;
+  virtual void cloneFrom(Node * other_) override;
 };
 inline Node * Graph::createPythonOp(THPObjectPtr&& pyobj, const std::string & cconv, bool is_legacy, pyobj_list&& scalar_args) {
   auto op = new PythonOp(this);
@@ -779,7 +879,7 @@ struct CppOp : public Node {
   CppOp(Graph * g)
   : Node(g,kCppOp) {}
   std::shared_ptr<torch::autograd::Function> fn;
-  std::string name();
+  std::string name() const;
   CppOp* init(std::shared_ptr<torch::autograd::Function> fn) {
     JIT_ASSERT(fn);
     this->fn = std::move(fn);

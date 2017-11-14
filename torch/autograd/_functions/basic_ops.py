@@ -4,222 +4,19 @@ from .utils import maybe_unexpand, maybe_unexpand_or_view
 import math
 
 
-@traceable
-class Add(InplaceFunction):
-
-    @staticmethod
-    def symbolic(g, a, b, inplace=False):
-        # TODO: [Export inplace]
-        return g.appendNode(g.create("Add", [a, b]))
-
-    @staticmethod
-    def forward(ctx, a, b, inplace=False):
-        ctx.a_size = a.size()
-        ctx.b_size = b.size()
-        if inplace:
-            ctx.mark_dirty(a)
-            return a.add_(b)
-        else:
-            return a.add(b)
-
-    @staticmethod
-    def backward(ctx, grad_output):
-        return maybe_unexpand(grad_output, ctx.a_size), maybe_unexpand_or_view(grad_output, ctx.b_size), None
+def sort_args(a, b, key=torch.is_tensor):
+    return (a, b, True) if key(a) else (b, a, False)
 
 
-@traceable
-class Sub(InplaceFunction):
-
-    @staticmethod
-    def symbolic(g, a, b, inplace=False):
-        # TODO: [Export inplace]
-        return g.appendNode(g.create("Sub", [a, b]))
-
-    @staticmethod
-    def forward(ctx, a, b, inplace=False):
-        ctx.a_size = a.size()
-        ctx.b_size = b.size()
-        if inplace:
-            ctx.mark_dirty(a)
-            return a.sub_(b)
-        else:
-            return a.sub(b)
-
-    @staticmethod
-    def backward(ctx, grad_output):
-        return maybe_unexpand(grad_output, ctx.a_size), maybe_unexpand_or_view(grad_output.neg(), ctx.b_size), None
-
-
-@traceable
-class Mul(Function):
-
-    @staticmethod
-    def symbolic(g, a, b, inplace=False):
-        # TODO: [Export inplace]
-        return g.op("Mul", a, b)
-
-    @staticmethod
-    def forward(ctx, a, b):
-        ctx.a_size = a.size()
-        ctx.b_size = b.size()
-        ctx.save_for_backward(a, b)
-        return a.mul(b)
-
-    @staticmethod
-    def backward(ctx, grad_output):
-        a, b = ctx.saved_variables
-        return maybe_unexpand(grad_output.mul(b), ctx.a_size), maybe_unexpand_or_view(grad_output.mul(a), ctx.b_size)
-
-
-@traceable
-class Div(Function):
-
-    @staticmethod
-    def forward(ctx, a, b):
-        ctx.a_size = a.size()
-        ctx.b_size = b.size()
-        ctx.save_for_backward(a, b)
-        return a.div(b)
-
-    @staticmethod
-    def backward(ctx, grad_output):
-        a, b = ctx.saved_variables
-        b_rec = b.reciprocal()
-        grad_a = grad_output.mul(b_rec)
-        grad_b = grad_output.neg().mul(a).mul(b_rec).mul(b_rec)
-        return maybe_unexpand(grad_a, ctx.a_size), maybe_unexpand_or_view(grad_b, ctx.b_size)
-
-
-@traceable
-class Pow(Function):
-
-    @staticmethod
-    def forward(ctx, a, b):
-        ctx.a_size = a.size()
-        ctx.b_size = b.size()
-        ctx.save_for_backward(a, b)
-        return a.pow(b)
-
-    @staticmethod
-    def backward(ctx, grad_output):
-        a, b = ctx.saved_variables
-        grad_a = grad_output.mul(b).mul(a.pow(b - 1))
-        grad_b = grad_output.mul(a.pow(b)).mul(a.log())
-        return maybe_unexpand(grad_a, ctx.a_size), maybe_unexpand_or_view(grad_b, ctx.b_size)
-
-
-def sort_args(a, b):
-    return (a, b, True) if torch.is_tensor(a) else (b, a, False)
-
-
-@traceable
-class AddConstant(InplaceFunction):
-
-    @staticmethod
-    def forward(ctx, a, b, inplace=False):
-        tensor, constant, ctx.tensor_first = sort_args(a, b)
-        if inplace:
-            ctx.mark_dirty(tensor)
-            return tensor.add_(constant)
-        else:
-            return tensor.add(constant)
-
-    @staticmethod
-    def backward(ctx, grad_output):
-        if ctx.tensor_first:
-            return grad_output, None, None
-        else:
-            return None, grad_output, None
-
-
-@traceable
-class SubConstant(InplaceFunction):
-
-    @staticmethod
-    def symbolic(g, a, b, inplace=False):
-        tensor_first = isinstance(a, torch._C.Node)
-        if tensor_first:
-            return g.op("SubConstant", a, value_f=b)
-        else:
-            return g.op("AddConstant", g.op("Neg", b).typeAs(b), value_f=a)
-
-    @staticmethod
-    def forward(ctx, a, b, inplace=False):
-        tensor, constant, ctx.tensor_first = sort_args(a, b)
-        if ctx.tensor_first:
-            if inplace:
-                ctx.mark_dirty(tensor)
-                return tensor.sub_(constant)
-            else:
-                return tensor.sub(constant)
-        else:
-            if inplace:
-                ctx.mark_dirty(tensor)
-                return tensor.neg_().add_(constant)
-            else:
-                return tensor.neg().add_(constant)
-
-    @staticmethod
-    def backward(ctx, grad_output):
-        if ctx.tensor_first:
-            return grad_output, None, None
-        else:
-            return None, grad_output.neg(), None
-
-
-@traceable
-class MulConstant(InplaceFunction):
-
-    @staticmethod
-    def forward(ctx, a, b, inplace=False):
-        tensor, ctx.constant, ctx.tensor_first = sort_args(a, b)
-        if inplace:
-            ctx.mark_dirty(tensor)
-            return tensor.mul_(ctx.constant)
-        else:
-            return tensor.mul(ctx.constant)
-
-    @staticmethod
-    def backward(ctx, grad_output):
-        grad_input = grad_output.mul(ctx.constant)
-        if ctx.tensor_first:
-            return grad_input, None, None
-        else:
-            return None, grad_input, None
-
-
-@traceable
-class DivConstant(InplaceFunction):
-
-    @staticmethod
-    def forward(ctx, a, b, inplace=False):
-        tensor, ctx.constant, ctx.tensor_first = sort_args(a, b)
-        ctx.inplace = inplace
-        if ctx.tensor_first:
-            if inplace:
-                ctx.mark_dirty(tensor)
-                return tensor.div_(ctx.constant)
-            else:
-                return tensor.div(ctx.constant)
-        else:
-            ctx.save_for_backward(tensor)
-            if inplace:
-                ctx.mark_dirty(tensor)
-                return tensor.reciprocal_().mul_(ctx.constant)
-            else:
-                return tensor.reciprocal().mul_(ctx.constant)
-
-    @staticmethod
-    def backward(ctx, grad_output):
-        if ctx.tensor_first:
-            return grad_output.div(ctx.constant), None, None
-        else:
-            v, = ctx.saved_variables
-            if ctx.inplace:
-                return None, grad_output.mul(v).mul(v).div_(-ctx.constant), None
-            else:
-                v_rep = v.reciprocal()
-                return None, grad_output.mul(v_rep).mul(v_rep).mul_(-ctx.constant), None
+def gen_inputs(g, a, b):
+    tensor, constant, tensor_first = sort_args(a, b, key=is_node)
+    assert tensor.hasType()
+    type = str(tensor.type().scalarType())
+    broadcast = False
+    if len(tensor.type().sizes()) > 1:
+        broadcast = True
+    constant = g.constant(constant, [0], type).setTypeAs(tensor)
+    return tensor, constant, broadcast, tensor_first
 
 
 @traceable
@@ -251,8 +48,8 @@ class Negate(InplaceFunction):
 
     @staticmethod
     def symbolic(g, i, inplace=False):
-        # TODO: [Export inplace]
-        return g.appendNode(g.create("Scale", [i]).f_("scale", -1))
+        # See Note [Export inplace]
+        return g.op("Scale", i, scale_f=-1)
 
     @staticmethod
     def forward(ctx, i, inplace=False):

@@ -1,5 +1,6 @@
 from functools import reduce
 import torch
+from torch._six import int_classes
 from torch._utils import _accumulate
 
 from ..function import Function, InplaceFunction, once_differentiable, traceable
@@ -19,6 +20,61 @@ def _preprocess_adv_index_seq(index):
 
 
 class Index(Function):
+    @staticmethod
+    def symbolic(g, i, index):
+        # We should only expect index as an integer in this case.
+        # We use "Slice" to get the index-th element in i,
+        # Then we reduce the dimension using "Reshape".
+        if isinstance(index, int_classes):
+            slice_node = g.op("Slice", i,
+                              axes_i=[0],
+                              starts_i=[index],
+                              ends_i=[index + 1])
+            return g.op("Squeeze", slice_node, axes_i=[0])
+        elif isinstance(index, tuple):
+            dims = i.type().sizes()
+            starts_list = []
+            ends_list = []
+            squeeze_indices = []
+
+            # Given an index, size of dimension, a list, and a default fill val,
+            # fill in based on these conditions:
+            # 1) not specified (None) - fill with fillval (e.g. 0 or size)
+            # 2) negative index - calculate corresponding positive index and append
+            # 3) positive index - append to list
+            # 4) integer - keep only that integer and squeeze it at the end
+            def append_index(index, dim, append_list, fillval):
+                if index is None:
+                    append_list.append(fillval)
+                else:
+                    addend = (dim if index < 0 else 0)
+                    append_list.append(index + addend)
+
+            for idx in range(len(index)):
+                if isinstance(index[idx], int_classes):
+                    starts_list.append(index[idx])
+                    ends_list.append(index[idx] + 1)
+                    squeeze_indices.append(idx)
+                    continue
+
+                # Start index
+                append_index(index[idx].start, dims[idx], starts_list, 0)
+                # End index
+                append_index(index[idx].stop, dims[idx], ends_list, dims[idx])
+
+                if index[idx].step is not None:
+                    raise ValueError("Strided slice is not supported at this time")
+
+            slice_node = g.op("Slice", i,
+                              axes_i=list(range(len(index))),
+                              starts_i=starts_list,
+                              ends_i=ends_list)
+            if squeeze_indices:
+                return g.op('Squeeze', slice_node, axes_i=squeeze_indices)
+            else:
+                return slice_node
+        else:
+            raise ValueError('Unsupported index type {}'.format(type(index)))
 
     @staticmethod
     def forward(ctx, i, index):
@@ -71,73 +127,6 @@ class SetItem(InplaceFunction):
         return grad_input, None, grad_value
 
 
-# TODO: how to do NoGrad in new style
-class NoGrad(Function):
-
-    def forward(self, i):
-        result = i.new(i)
-        self.mark_non_differentiable(result)
-        self.mark_shared_storage((i, result))
-        return result
-
-    def backward(self, grad_output):
-        assert False, "backward of NoGrad should never be called"
-
-    def _do_forward(self, *args, **kwargs):
-        result = super(NoGrad, self)._do_forward(*args, **kwargs)
-        self.requires_grad = False
-        return result
-
-    __call__ = _do_forward
-
-
-@traceable
-class Transpose(Function):
-
-    @staticmethod
-    def symbolic(g, i, dim1, dim2):
-        # NB: Swap dim1 and dim2, which is different from ONNX's
-        # Transpose, which is actually a permute.
-        if dim1 == dim2:
-            return i
-
-        axes = list(range(len(i.type().sizes())))
-        axes[dim1], axes[dim2] = axes[dim2], axes[dim1]
-        return g.op("Transpose", i, perm_i=axes)
-
-    @staticmethod
-    def forward(ctx, i, dim1, dim2):
-        result = i.transpose(dim1, dim2)
-        ctx.dims = (dim1, dim2)
-        ctx.mark_shared_storage((i, result))
-        return result
-
-    @staticmethod
-    def backward(ctx, grad_output):
-        return grad_output.transpose(*ctx.dims), None, None
-
-
-class View(Function):
-
-    @staticmethod
-    def symbolic(g, i, sizes):
-        if len(sizes) == 1 and isinstance(sizes[0], torch.Size):
-            sizes = sizes[0]
-        return g.op("Reshape", i, shape_i=sizes)
-
-    @staticmethod
-    def forward(ctx, i, sizes):
-        ctx.new_sizes = sizes
-        ctx.old_size = i.size()
-        result = i.view(*sizes)
-        ctx.mark_shared_storage((i, result))
-        return result
-
-    @staticmethod
-    def backward(ctx, grad_output):
-        return grad_output.contiguous().view(ctx.old_size), None
-
-
 class Expand(Function):
 
     @staticmethod
@@ -183,11 +172,11 @@ class Type(Function):
 class CudaTransfer(Function):
 
     @staticmethod
-    def forward(ctx, i, device_id=None, async=False):
+    def forward(ctx, i, device=None, async=False):
         ctx.source_device = -1 if not i.is_cuda else i.get_device()
         ctx.source_was_cuda = i.is_cuda
-        if device_id is not None:
-            return i.cuda(device_id, async=async)
+        if device is not None:
+            return i.cuda(device, async=async)
         else:
             return i.cuda(async=async)
 
@@ -199,28 +188,6 @@ class CudaTransfer(Function):
             return grad_output, None, None
         else:
             return grad_output.cpu(), None, None
-
-
-class Permute(Function):
-
-    @staticmethod
-    def symbolic(g, input, dim_indices):
-        if dim_indices == list(range(0, len(dim_indices))):
-            return input
-        return g.op("Transpose", input, perm_i=dim_indices)
-
-    @staticmethod
-    def forward(ctx, input, dim_indices):
-        ctx.rev_dim_indices = [None for _ in range(len(dim_indices))]
-        for i, dim_idx in enumerate(dim_indices):
-            ctx.rev_dim_indices[dim_idx] = i
-        result = input.permute(*dim_indices)
-        ctx.mark_shared_storage((input, result))
-        return result
-
-    @staticmethod
-    def backward(ctx, grad_output):
-        return grad_output.permute(*ctx.rev_dim_indices), None
 
 
 class IndexAdd(InplaceFunction):
@@ -358,24 +325,6 @@ class IndexSelect(Function):
         return grad_tensor, None, None
 
 
-class Concat(Function):
-
-    @staticmethod
-    def symbolic(g, dim, *inputs):
-        return g.op("Concat", *inputs, axis_i=dim)
-
-    @staticmethod
-    def forward(ctx, dim, *inputs):
-        ctx.dim = dim
-        ctx.input_sizes = [i.size(dim) for i in inputs]
-        return torch.cat(inputs, dim)
-
-    @staticmethod
-    def backward(ctx, grad_output):
-        return (None,) + tuple(grad_output.narrow(ctx.dim, end - size, size) for size, end
-                               in zip(ctx.input_sizes, _accumulate(ctx.input_sizes)))
-
-
 # TODO: deprecate this
 class Resize(Function):
 
@@ -413,44 +362,6 @@ class Clone(Function):
     @staticmethod
     def backward(ctx, grad_output):
         return grad_output
-
-
-class Squeeze(InplaceFunction):
-
-    @staticmethod
-    def symbolic(g, input, dim, inplace=False):
-        # TODO: [Export inplace]
-        if dim is None:
-            dims = []
-            for i, size in enumerate(input.type().sizes()):
-                if size == 1:
-                    dims.append(i)
-        else:
-            dims = [dim]
-        return g.op("Squeeze", input, axes_i=dims)
-
-    @staticmethod
-    def forward(ctx, input, dim=None, inplace=False):
-        ctx.dim = dim
-        ctx.input_size = input.size()
-        if inplace:
-            ctx.mark_dirty(input)
-            if dim is not None:
-                return input.squeeze_(dim)
-            else:
-                return input.squeeze_()
-        else:
-            if dim is not None:
-                result = input.squeeze(dim)
-            else:
-                result = input.squeeze()
-
-            ctx.mark_shared_storage((input, result))
-            return result
-
-    @staticmethod
-    def backward(ctx, grad_output):
-        return grad_output.contiguous().view(ctx.input_size), None, None
 
 
 class Unsqueeze(Function):
@@ -598,39 +509,6 @@ class Topk(_MultiSelectionFunction):
         args = (k, ctx.dim, largest, sort)
         ctx.num_flags = 5
         return _MultiSelectionFunction.forward(ctx, input, dim, return_indices, args)
-
-
-@traceable
-class Chunk(Function):
-
-    @staticmethod
-    def symbolic(g, i, num_chunks, dim=0):
-        dim_size = i.type().sizes()[dim]
-        split_size = (dim_size + num_chunks - 1) // num_chunks
-        lengths = []
-        count_chunks = 0
-        while (dim_size > 0):
-            this_split_size = split_size if dim_size >= split_size else dim_size
-            lengths.append(this_split_size)
-            dim_size = dim_size - split_size
-            count_chunks = count_chunks + 1
-        result = []
-        n = g.appendNode(g.create("Split", [i]).is_("split", lengths).i_("axis", dim))
-        for i in range(count_chunks):
-            result.append(g.appendNode(g.createSelect(n, i)))
-        return tuple(result)
-
-    @staticmethod
-    def forward(ctx, i, num_chunks, dim=0):
-        ctx.dim = dim
-        result = i.chunk(num_chunks, dim)
-        ctx.mark_shared_storage(*((i, chunk) for chunk in result))
-        return result
-
-    @staticmethod
-    def backward(ctx, *grad_output):
-        grad_input = torch.cat(grad_output, ctx.dim)
-        return grad_input, None, None
 
 
 class Gather(Function):

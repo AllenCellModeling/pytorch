@@ -13,16 +13,64 @@ namespace {
 // Some of these restrictions may be relaxable, but you should
 // carefully read the code first, as we rely on these assumptions.
 std::unordered_set<NodeKind> simple_mappable = {
-  kSigmoid,
-  kTanh,
-  kMul,
-  kAdd,
-  kNeg,
-  kAddConstant,
+  k__and__,
+  k__lshift__,
+  k__or__,
+  k__rshift__,
+  k__xor__,
+  kabs,
+  kacos,
+  kadd,
+  kasin,
+  katan,
+  katan2,
+  kceil,
+  kclamp,
+  kcos,
+  kcosh,
+  kdiv,
+  keq,
+  kexp,
+  kfloor,
+  kfmod,
+  kfrac,
+  kge,
+  kgt,
+  kle,
+  klerp,
+  klgamma,
+  klog,
+  klog1p,
+  klt,
+  kmax,
+  kmin,
+  kmul,
+  kne,
+  kneg,
+  kones,
+  kpow,
+  kreciprocal,
+  kremainder,
+  kround,
+  krsqrt,
+  ksigmoid,
+  ksin,
+  ksinh,
+  ksqrt,
+  ksub,
+  ktan,
+  ktanh,
+  ktrunc,
+  kzeros,
 };
 
 bool isSimpleMap(Node *node) {
-  return simple_mappable.count(node->kind());
+  if(simple_mappable.count(node->kind())) {
+    if(node->kind() == kmin || node->kind() == kmax)
+      return node->inputs().size() == 2; // unary min/max is a reduction...
+    return true;
+  }
+  return false;
 }
 
 struct GraphFuser {
@@ -41,11 +89,35 @@ struct GraphFuser {
   bool isCuda(Node * node) {
     return node->type()->expect<TensorType>()->device() != -1;
   }
-
+  // TODO: the fusion compiler has a lot of float-specific codegen
+  // so for now we only consider nodes that operate on floating point numbers
+  bool hasFloatType(Node * node) {
+    if(!node->hasType()) {
+      return false;
+    }
+    if(auto tt = node->type()->cast<TensorType>()) {
+      return tt->scalarType() != at::kFloat;
+    } else {
+      return false;
+    }
+  }
+  bool allFloatIO(Node * node) {
+    for(auto & o : node->outputs()) {
+      if(!hasFloatType(o)) {
+        return false;
+      }
+    }
+    for(auto & o : node->inputs()) {
+      if(!hasFloatType(o)) {
+        return false;
+      }
+    }
+    return true;
+  }
   bool isFusable(Node * node) {
     if (!node->hasType()) return false;
     if (node->kind() == kFusionGroup) return true;
-    return isSimpleMap(node) && isCuda(node);
+    return isSimpleMap(node) && allFloatIO(node) && isCuda(node);
   }
 
   // Can this node produce an _output_ of a fusion group?
@@ -55,12 +127,12 @@ struct GraphFuser {
   bool isFusableAsExitNode(Node * node) {
     if(isFusable(node))
       return true;
-    if(node->kind() != kConcat || !isCuda(node))
+    if(node->kind() != kcat || !isCuda(node))
       return false;
 
     // this concat fusion only works when all the inputs are the same size
     // otherwise they cannot partipate in the same map
-    auto sizes = node->inputs().at(0)->type()->expect<TensorType>()->sizes();
+    auto sizes = node->input(0)->type()->expect<TensorType>()->sizes();
     for(auto i : node->inputs()) {
       if(sizes != i->type()->expect<TensorType>()->sizes()){
         return false;
@@ -107,7 +179,6 @@ struct GraphFuser {
   }
   Node * mergeNodeIntoGroup(Node* group, Node * n) {
     auto & subgraph = getSubgraph(group);
-    auto & inputs = group->inputs();
     // map from nodes in the surrounding graph to parameters in the fusion
     // group's subgraph that correspond to them
     std::unordered_map<Node*,Node*> inputs_map;
@@ -133,6 +204,7 @@ struct GraphFuser {
     // we need to remove it because n is now inside the fusion group
     // remapping nodes that used the input to the newly-merged node
     // n is not an input when the fusion group is empty
+    auto inputs = group->inputs();
     auto it = std::find(inputs.begin(), inputs.end(), n);
     if(it != inputs.end()) {
       size_t p = it - inputs.begin();
@@ -192,12 +264,7 @@ struct GraphFuser {
   }
 
   bool isChunk(Node * node) {
-    if (node->kind() != kSplit) return false;
-    // All splits have to be equal
-    auto & splits = node->is(ksplit);
-    for (auto s : splits)
-      if (s != splits[0]) return false;
-    return true;
+    return node->kind() == ksplit;
   }
 
   // in places where op can be fused into a consumer but chunk is in the way
@@ -254,7 +321,7 @@ struct GraphFuser {
       // NB: I decided not to use cloneFrom here, because if we make cloneFrom
       // copy selects one day, it is definitely not what you want here (selects
       // have different types).
-      Node * input_chunk = graph->create(kSplit);
+      Node * input_chunk = graph->create(ksplit);
       input_chunk->setType(multiType());
       input_chunk->copyAttributes(*chunk);
       input_chunk->addInput(input);

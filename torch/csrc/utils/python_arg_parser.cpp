@@ -27,6 +27,7 @@ static std::unordered_map<std::string, ParameterType> type_map = {
 FunctionParameter::FunctionParameter(const std::string& fmt, bool keyword_only)
   : optional(false)
   , keyword_only(keyword_only)
+  , size(0)
   , default_scalar(0)
 {
   auto space = fmt.find(' ');
@@ -35,8 +36,19 @@ FunctionParameter::FunctionParameter(const std::string& fmt, bool keyword_only)
   }
 
   auto type_str = fmt.substr(0, space);
+  auto bracket = type_str.find('[');
+  if (bracket != std::string::npos) {
+    auto size_str = type_str.substr(bracket + 1, type_str.length() - bracket - 2);
+    size = atoi(size_str.c_str());
+    type_str = type_str.substr(0, bracket);
+  }
+
   auto name_str = fmt.substr(space + 1);
-  type_ = type_map[type_str];
+  auto it = type_map.find(type_str);
+  if (it == type_map.end()) {
+    throw std::runtime_error("FunctionParameter(): invalid type string: " + type_str);
+  }
+  type_ = it->second;
 
   auto eq = name_str.find('=');
   if (eq != std::string::npos) {
@@ -55,12 +67,23 @@ FunctionParameter::FunctionParameter(const std::string& fmt, bool keyword_only)
 
 bool FunctionParameter::check(PyObject* obj) {
   switch (type_) {
-    case ParameterType::TENSOR: return THPVariable_Check(obj);
+    case ParameterType::TENSOR: {
+      return THPVariable_Check(obj) || (optional && obj == Py_None);
+    }
     case ParameterType::SCALAR: return THPUtils_checkDouble(obj);
     case ParameterType::INT64: return THPUtils_checkLong(obj);
     case ParameterType::DOUBLE: return THPUtils_checkDouble(obj);
     case ParameterType::TENSOR_LIST: return PyTuple_Check(obj) || PyList_Check(obj);
-    case ParameterType::INT_LIST: return PyTuple_Check(obj) || PyList_Check(obj);
+    case ParameterType::INT_LIST: {
+      if (PyTuple_Check(obj) || PyList_Check(obj)) {
+        return true;
+      }
+      if (optional && obj == Py_None) {
+        return true;
+      }
+      // if a size is specified (e.g. IntList[2]) we also allow passing a single int
+      return size > 0 && THPUtils_checkLong(obj);
+    }
     case ParameterType::GENERATOR: return false;
     case ParameterType::BOOL: return PyBool_Check(obj);
     case ParameterType::STORAGE: return false;
@@ -97,6 +120,10 @@ void FunctionParameter::set_default_str(const std::string& str) {
     default_double = atof(str.c_str());
   } else if (type_ == ParameterType::SCALAR) {
     default_scalar = Scalar(atof(str.c_str()));
+  } else if (type_ == ParameterType::INT_LIST) {
+    if (str != "None") {
+      default_intlist.assign(size, std::stoi(str));
+    }
   }
 }
 
@@ -226,7 +253,7 @@ static void missing_args(const FunctionSignature& signature, int idx) {
 static ssize_t find_param(FunctionSignature& signature, PyObject* name) {
   ssize_t i = 0;
   for (auto& param : signature.params) {
-    int cmp = PyObject_RichCompareBool(name, param.python_name.get(), Py_EQ);
+    int cmp = PyObject_RichCompareBool(name, param.python_name, Py_EQ);
     if (cmp < 0) {
       throw python_error();
     } else if (cmp) {
@@ -309,7 +336,7 @@ bool FunctionSignature::parse(PyObject* args, PyObject* kwargs, PyObject* dst[],
       }
     }
 
-    obj = kwargs ? PyDict_GetItem(kwargs, param.python_name.get()) : nullptr;
+    obj = kwargs ? PyDict_GetItem(kwargs, param.python_name) : nullptr;
     if (obj) {
       remaining_kwargs--;
       if (!param.check(obj)) {

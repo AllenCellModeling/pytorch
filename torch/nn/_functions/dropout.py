@@ -12,14 +12,9 @@ class Dropout(InplaceFunction):
 
     @staticmethod
     def symbolic(g, input, p=0.5, train=False, inplace=False):
-        if inplace:
-            return None
-        n = g.appendNode(g.create("Dropout", [input])
-                          .f_("ratio", p)
-                          .i_("is_test", not train))
-        real = g.appendNode(g.createSelect(n, 0))
-        g.appendNode(g.createSelect(n, 1))
-        return real
+        # See Note [Export inplace]
+        r, _ = g.op("Dropout", input, ratio_f=p, is_test_i=not train, outputs=2)
+        return r
 
     @classmethod
     def forward(cls, ctx, input, p=0.5, train=False, inplace=False):
@@ -58,8 +53,13 @@ class Dropout(InplaceFunction):
 class FeatureDropout(Dropout):
 
     @staticmethod
-    def symbolic(input, p=0.5, train=False, inplace=False):
-        return None
+    def symbolic(g, input, p=0.5, train=False, inplace=False):
+        # See Note [Export inplace]
+        # NB: In inference mode, FeatureDropout is exported as an identity op.
+        from torch.onnx.symbolic import _unimplemented
+        if train:
+            return _unimplemented("FeatureDropout", "training mode")
+        return input
 
     @staticmethod
     def _make_noise(input):
