@@ -25,6 +25,11 @@ Tensor not_implemented(const char* name) {
       std::string("the derivative for '") + name + "' is not implemented");
 }
 
+Tensor not_differentiable(const char* name) {
+  throw std::runtime_error(
+      std::string("'") + name + "' is not differentiable");
+}
+
 Tensor maybe_multiply(const Tensor & t, const Scalar & s) {
   bool is_one = false;
   if (s.isFloatingPoint()) {
@@ -179,10 +184,9 @@ Tensor trace_backward(const Tensor & grad, IntList sizes) {
     throw std::runtime_error("expected matrix input");
   }
 
-  // TODO: simplify once toScalarType is virtual
+  // TODO: simplify once index_fill_(Tensor) is implemented on Variable
   auto grad_data = static_cast<const Variable&>(grad).data();
-  auto& long_type = *VariableImpl::getType(
-      grad_data.type().toScalarType(at::kLong));
+  auto& long_type = grad.type().toScalarType(at::kLong);
 
   auto grad_input = grad.type().zeros(sizes[0] * sizes[1]);
   auto indices = long_type.arange(0, grad_input.numel(), sizes[1] + 1);
@@ -191,9 +195,7 @@ Tensor trace_backward(const Tensor & grad, IntList sizes) {
 }
 
 Tensor unfold_backward(const Tensor & grad, IntList input_sizes, int64_t dim, int64_t size, int64_t step) {
-  // TODO: simplify once toScalarType is virtual
-  auto& long_type = *VariableImpl::getType(
-      Variable(grad).data().type().toScalarType(at::kLong));
+  auto& long_type = grad.type().toScalarType(at::kLong);
 
   int64_t numel = 1;
   for (auto size : input_sizes) {
@@ -205,6 +207,17 @@ Tensor unfold_backward(const Tensor & grad, IntList input_sizes, int64_t dim, in
   auto grad_input = grad.type().zeros({numel});
   grad_input.index_add_(0, idx_unfolded, grad.contiguous().view(-1));
   return grad_input.view(input_sizes);
+}
+
+Tensor var_backward(const Tensor & grad, const Tensor & self, bool unbiased) {
+  return (2.0 / (self.numel() - unbiased)) * grad * (self - self.mean());
+}
+
+Tensor var_backward(Tensor grad, const Tensor & self, int64_t dim, bool unbiased, bool keepdim) {
+  if (!keepdim && self.dim() > 1) {
+    grad = grad.unsqueeze(dim);
+  }
+  return (2.0 / (self.size(dim) - unbiased)) * grad * (self - self.mean(dim, true));
 }
 
 Tensor masked_scatter_backward(const Tensor & grad, const Tensor & mask, IntList sizes) {

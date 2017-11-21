@@ -10,9 +10,9 @@ ScalarType UndefinedType::scalarType() const {
 Backend UndefinedType::backend() const {
   return Backend::Undefined;
 }
-bool UndefinedType::isCuda() const { return false; }
-bool UndefinedType::isSparse() const { return false; }
-bool UndefinedType::isDistributed() const { return false; }
+bool UndefinedType::is_cuda() const { return false; }
+bool UndefinedType::is_sparse() const { return false; }
+bool UndefinedType::is_distributed() const { return false; }
 
 std::unique_ptr<Storage> UndefinedType::storage() const {
   runtime_error("storage not defined for UndefinedType");

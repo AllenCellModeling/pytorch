@@ -55,9 +55,9 @@ struct AT_API Type {
   virtual ~Type() {}
   virtual ScalarType scalarType() const = 0;
   virtual Backend backend() const = 0;
-  virtual bool isCuda() const = 0;
-  virtual bool isSparse() const = 0;
-  virtual bool isDistributed() const = 0;
+  virtual bool is_cuda() const = 0;
+  virtual bool is_sparse() const = 0;
+  virtual bool is_distributed() const = 0;
   static void registerAll(Context * context);
   virtual std::unique_ptr<Storage> storage() const = 0;
   virtual std::unique_ptr<Storage> storage(size_t size) const = 0;
@@ -68,6 +68,7 @@ struct AT_API Type {
   virtual std::size_t elementSizeInBytes() const = 0;
   virtual Type & toBackend(Backend b) const;
   virtual Type & toScalarType(ScalarType s) const;
+  Context& get_context() const { return *context; }
 
   // contingious IDs for all types in the system
   // for external dispatch

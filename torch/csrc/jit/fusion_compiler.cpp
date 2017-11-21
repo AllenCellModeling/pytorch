@@ -3,6 +3,7 @@
 #include "torch/csrc/jit/code_template.h"
 #include "torch/csrc/jit/resource_guard.h"
 #include "torch/csrc/utils/disallow_copy.h"
+#include "torch/csrc/cuda/cuda_check.h"
 #include "ATen/ATen.h"
 #include <nvrtc.h>
 #include <cuda.h>
@@ -104,36 +105,6 @@ std::ostream& operator<<(std::ostream & out, const TensorDesc & d) {
   return out;
 }
 
-// We're using three CUDA APIs, so define a few helpers for error handling
-static void nvrtcCheck(nvrtcResult result,const char * file, int line) {
-  if(result != NVRTC_SUCCESS) {
-    std::stringstream ss;
-    ss << file << ":" << line << ": " << nvrtcGetErrorString(result);
-    throw std::runtime_error(ss.str());
-  }
-}
-#define JIT_NVRTC_CHECK(result) nvrtcCheck(result,__FILE__,__LINE__);
-
-static void cuCheck(CUresult result, const char * file, int line) {
-  if(result != CUDA_SUCCESS) {
-    const char * str;
-    cuGetErrorString(result, &str);
-    std::stringstream ss;
-    ss << file << ":" << line << ": " << str;
-    throw std::runtime_error(ss.str());
-  }
-}
-#define JIT_CU_CHECK(result) cuCheck(result,__FILE__,__LINE__);
-
-static void cudaCheck(cudaError_t result, const char * file, int line) {
-  if(result != cudaSuccess) {
-    std::stringstream ss;
-    ss << file << ":" << line << ": " << cudaGetErrorString(result);
-    throw std::runtime_error(ss.str());
-  }
-}
-#define JIT_CUDA_CHECK(result) cudaCheck(result,__FILE__,__LINE__);
-
 ////////////////////////////////////////////////////////////////////////////////
 // Code generation
 
@@ -187,7 +158,7 @@ void emitIndexingFor(std::ostream & out, const std::string & tensor, int ndim, b
   }
 }
 
-std::string nodeName(Node * n) {
+std::string valueName(Value * n) {
   return "n" + std::to_string(n->unique());
 }
 
@@ -213,7 +184,7 @@ std::string encodeRHS(Node * n) {
   TemplateEnv env;
   size_t i = 0;
   for(auto in : n->inputs()) {
-    env.s(std::to_string(i++),nodeName(in));
+    env.s(std::to_string(i++),valueName(in));
   }
   // ops like div have a / b or a / 2 with the constant having the attribute other
   // so we add other as an input if it is present
@@ -246,7 +217,7 @@ std::vector<ConcatDesc> emitCompilationUnit(std::ostream & out,
   std::stringstream body;
   std::stringstream tensorOffsets;
   std::vector<std::string> formals;
-  auto emitFormal = [&](Node * n, const TensorDesc & desc) {
+  auto emitFormal = [&](Value * n, const TensorDesc & desc) {
     std::string tensor = "t" + std::to_string(formals.size()); //can't be unique() because Param may be an output
     size_t nDim = desc.nDim();
     emitIndexingFor(tensorOffsets, tensor, nDim,  desc.lastIsContiguous());
@@ -261,19 +232,20 @@ std::vector<ConcatDesc> emitCompilationUnit(std::ostream & out,
       emitFormal(p,agraph.input_desc[i++]);
   }
   std::vector<ConcatDesc> concat_desc;
-  std::vector<Node*> flat_output_nodes;
+  std::vector<Value*> flat_output_nodes;
   {
     size_t i = 0;
     for(auto o : subgraph.outputs()) {
       auto & desc = agraph.output_desc[i++];
-      if(o->kind() != kcat) {
+      if(o->node()->kind() != kcat) {
         emitFormal(o, desc);
         concat_desc.emplace_back();
         flat_output_nodes.push_back(o);
       } else {
-        size_t nInputs = o->inputs().size();
-        concat_desc.emplace_back(desc, nInputs, o->i(kdim));
-        for(auto c : o->inputs()) {
+        auto cat = o->node();
+        size_t nInputs = cat->inputs().size();
+        concat_desc.emplace_back(desc, nInputs, cat->i(kdim));
+        for(auto c : cat->inputs()) {
           emitFormal(c, *concat_desc.back().subtensorDesc);
           flat_output_nodes.push_back(c);
         }
@@ -282,7 +254,7 @@ std::vector<ConcatDesc> emitCompilationUnit(std::ostream & out,
   }
   size_t formal_count = 0;
   for(auto p : subgraph.inputs()) {
-    env.s("node",nodeName(p));
+    env.s("node",valueName(p));
     env.d("formal",formal_count++);
     env.s("access",format("t${formal}.data[t${formal}_offset]",env));
     //TODO: actual type propagation rather than relying on auto..
@@ -291,14 +263,14 @@ std::vector<ConcatDesc> emitCompilationUnit(std::ostream & out,
   for(auto n : subgraph.nodes()) {
     if(n->kind() == kcat)
       continue; // Concat nodes by narrowing the output Tensors before the kernel runs
-    env.s("node",nodeName(n));
+    env.s("node",valueName(n->output()));
     env.s("rhs", encodeRHS(n));
     body << format("auto ${node} = ${rhs};\n",env);
   }
   for(auto o : flat_output_nodes) {
     env.d("formal",formal_count++);
     env.s("access",format("t${formal}.data[t${formal}_offset]",env));
-    env.s("node",nodeName(o));
+    env.s("node",valueName(o));
     body << format("${access} = ${node};\n",env);
   }
   env.s("tensorOffsets",tensorOffsets.str());
@@ -327,14 +299,23 @@ CompiledFusionFunction::CompiledFusionFunction(const std::string & name, Annotat
   : name(name)
   , input_desc(agraph.input_desc)
   , output_desc(agraph.output_desc) {
-  JIT_CUDA_CHECK(cudaGetDevice(&device));
-  JIT_CUDA_CHECK(cudaGetDeviceProperties(&prop, device));
+  TORCH_CUDA_CHECK(cudaGetDevice(&device));
+  TORCH_CUDA_CHECK(cudaGetDeviceProperties(&prop, device));
+
+  if ((prop.major >= 6 && CUDA_VERSION < 8000) ||
+      (prop.major >= 7 && CUDA_VERSION < 9000)) {
+    std::stringstream err_string;
+    err_string << "In CompiledFusionFunction, PyTorch compiled with insufficient CUDA version: " 
+	       << CUDA_VERSION << " for the current GPU device " << prop.name 
+	       << " with device capability " << prop.major << "." << prop.minor;
+    throw std::runtime_error(err_string.str());
+  }
 
   std::stringstream cu;
   concat_desc = codegen::emitCompilationUnit(cu, name, agraph);
   compilation_unit = cu.str();
   nvrtcProgram program;
-  JIT_NVRTC_CHECK(nvrtcCreateProgram(&program, compilation_unit.c_str(), NULL, 0, nullptr, nullptr));
+  TORCH_NVRTC_CHECK(nvrtcCreateProgram(&program, compilation_unit.c_str(), NULL, 0, nullptr, nullptr));
 
   std::string compute = "--gpu-architecture=compute_" + std::to_string(prop.major) + std::to_string(prop.minor);
   std::vector<const char *> args = {"--std=c++11", compute.c_str()};
@@ -348,25 +329,25 @@ CompiledFusionFunction::CompiledFusionFunction(const std::string & name, Annotat
     throw std::runtime_error(cu.str());
   }
   ResourceGuard holdProgram([&] {
-    JIT_NVRTC_CHECK(nvrtcDestroyProgram(&program));
+    TORCH_NVRTC_CHECK(nvrtcDestroyProgram(&program));
   });
-  JIT_NVRTC_CHECK(result);
+  TORCH_NVRTC_CHECK(result);
 
   size_t ptx_size;
-  JIT_NVRTC_CHECK(nvrtcGetPTXSize(program, &ptx_size));
+  TORCH_NVRTC_CHECK(nvrtcGetPTXSize(program, &ptx_size));
   ptx.resize(ptx_size);
-  JIT_NVRTC_CHECK(nvrtcGetPTX(program, ptx.data()));
+  TORCH_NVRTC_CHECK(nvrtcGetPTX(program, ptx.data()));
 
-  JIT_CU_CHECK(cuModuleLoadData(&module, ptx.data()));
-  JIT_CU_CHECK(cuModuleGetFunction(&function, module, name.c_str()));
+  TORCH_CU_CHECK(cuModuleLoadData(&module, ptx.data()));
+  TORCH_CU_CHECK(cuModuleGetFunction(&function, module, name.c_str()));
 
-  JIT_CU_CHECK(cuOccupancyMaxActiveBlocksPerMultiprocessor(
+  TORCH_CU_CHECK(cuOccupancyMaxActiveBlocksPerMultiprocessor(
     &maxBlocks, function, 128, 0));
   maxBlocks *= prop.multiProcessorCount;
 }
 
 CompiledFusionFunction::~CompiledFusionFunction() {
-  JIT_CU_CHECK(cuModuleUnload(module));
+  TORCH_CU_CHECK(cuModuleUnload(module));
 }
 
 namespace {
@@ -499,7 +480,7 @@ void CompiledFusionFunction::launch(uint32_t numel, void ** arguments) {
   // cudaFree(0) accomplishes this.
   cudaFree(0);
 
-  JIT_CU_CHECK(cuLaunchKernel(
+  TORCH_CU_CHECK(cuLaunchKernel(
     function,
     numBlocks, 1, 1,
     blockSize, 1, 1,
@@ -512,7 +493,7 @@ std::shared_ptr<CompiledFusionFunction> FusionCompiler::getOrCompile(AnnotatedGr
   std::stringstream key;
   key << *agraph.graph << "\n";
   int device;
-  JIT_CUDA_CHECK(cudaGetDevice(&device));
+  TORCH_CUDA_CHECK(cudaGetDevice(&device));
   key << "Device " << device << "\n";
   for(auto & i : agraph.input_desc)
     key << i << "\n";

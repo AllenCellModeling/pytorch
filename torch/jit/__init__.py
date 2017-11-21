@@ -16,7 +16,6 @@ import copy
 
 
 _flatten = torch._C._jit_flatten
-_unflatten = torch._C._jit_unflatten
 
 
 def compile(arg=None, nderivs=1, optimize=True, enabled=True):
@@ -133,6 +132,7 @@ def compile(arg=None, nderivs=1, optimize=True, enabled=True):
                     obj.compiled_fn = compiled_fn
                     obj.forward = lambda *args: compiled_fn(args, list(obj.parameters()))
                     obj.has_trace_for = lambda *args: compiled_fn.has_trace_for(args, list(obj.parameters()))
+                    obj.graph_for = lambda *args: compiled_fn.graph_for(args, list(obj.parameters()))
                     return obj
 
             # NB: It might seem natural to create a subclass here, rather than
@@ -227,13 +227,13 @@ class TracedModule(Module):
         self.nderivs = nderivs
 
     def forward(self, *args):
-        in_vars, _, _ = _flatten(args)
+        in_vars = _flatten(args)
         # NOTE: use full state, because we need it for BatchNorm export
         # This differs from the compiler path, which doesn't support it at the moment.
         module_state = list(self.state_dict(keep_vars=True).values())
         trace = torch._C._tracer_enter(in_vars + module_state, self.nderivs)
         out = self.inner(*args)
-        out_vars, _, _ = _flatten(out)
+        out_vars = _flatten(out)
         torch._C._tracer_exit(out_vars)
         return trace, out
 
@@ -335,7 +335,7 @@ def verify(model, args, loss_fn=torch.sum, devices=None):
     saved_state = copy.deepcopy(model.state_dict())
 
     def run_fwd_bwd(args, force_trace=False, assert_compiled=False):
-        in_vars, _, _ = _flatten((args, list(model.parameters())))
+        in_vars = _flatten((args, list(model.parameters())))
         # We use a special API to reset the trace and compile it from scratch.
         compiled_fn = model.compiled_fn
         if force_trace:
@@ -350,7 +350,7 @@ def verify(model, args, loss_fn=torch.sum, devices=None):
         if loss_fn == torch.sum and len(out) != 1:
             raise ValueError(("Model returns {} outputs, but default loss function "
                              "(torch.sum) can only handle a single output").format(len(out)))
-        out_vars, _, _ = _flatten(out)
+        out_vars = _flatten(out)
         saved_outs = [v.data.clone() for v in out_vars]
         loss = loss_fn(*out)
         grads = torch.autograd.grad([loss], in_vars)

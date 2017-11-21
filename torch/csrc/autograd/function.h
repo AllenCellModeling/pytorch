@@ -56,7 +56,6 @@ struct Function : std::enable_shared_from_this<Function> {
     : num_inputs(0)
     , next_functions()
     , is_executable(false)
-    , is_stochastic(false)
     , pre_hooks()
     , post_hooks()
     , pyobj(nullptr)
@@ -66,7 +65,6 @@ struct Function : std::enable_shared_from_this<Function> {
     : num_inputs(0)
     , next_functions(std::move(flags.next_functions))
     , is_executable(flags.is_executable)
-    , is_stochastic(false)
     , pre_hooks()
     , post_hooks()
     , pyobj(nullptr)
@@ -157,13 +155,12 @@ struct Function : std::enable_shared_from_this<Function> {
   // need to be implemented :)
   virtual inline std::unique_ptr<saved_variable_list> saved_variables() { return nullptr; }
 
-  static void setUpContextEdge(jit::Node* this_node, int ctx_output_nr,
+  static void setUpContextEdge(jit::Node* this_node,
                                const variable_list& inputs, const variable_list& outputs);
 
   int num_inputs;
   function_list next_functions;
   bool is_executable;
-  bool is_stochastic;
   std::vector<std::shared_ptr<FunctionPreHook>> pre_hooks;
   std::vector<std::shared_ptr<FunctionPostHook>> post_hooks;
 

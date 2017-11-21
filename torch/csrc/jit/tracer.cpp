@@ -13,6 +13,26 @@
 
 namespace torch { namespace jit { namespace tracer {
 
+// Python interpreter retrieval routine adapted from
+// https://stackoverflow.com/a/8706144
+std::string getPythonInterpreterStackTrace() {
+  std::stringstream stack_trace;
+  AutoGIL gil;
+  PyThreadState *tstate = PyThreadState_GET();
+  if (NULL != tstate && NULL != tstate->frame) {
+    PyFrameObject *frame = tstate->frame;
+
+    while (NULL != frame) {
+      int line = PyCode_Addr2Line(frame->f_code, frame->f_lasti);
+      std::string filename = THPUtils_unpackString(frame->f_code->co_filename);
+      std::string funcname = THPUtils_unpackString(frame->f_code->co_name);
+      stack_trace << filename << "(" << line << "): " << funcname << "\n";
+      frame = frame->f_back;
+    }
+  }
+  return stack_trace.str();
+}
+
 namespace {
 
 struct TraceEval : autograd::Eval {
@@ -56,7 +76,7 @@ struct TraceEval : autograd::Eval {
     graph->advanceStage();
 
     for (auto & input : inputs) {
-      Node *input_node = graph->addInput();
+      Value *input_node = graph->addInput();
       if (!input.defined()) continue;
       JIT_ASSERT(!detail::getValueState(tracing_state, input, false));
       setValueTrace(tracing_state, input, input_node);
@@ -95,28 +115,6 @@ void nontraceableBackwardSubgraph(const variable_list& inputs, const variable_li
   std::make_shared<autograd::Eval>()->replaceSubgraph(inputs, outputs);
 }
 
-namespace {
-// Python interpreter retrieval routine adapted from
-// https://stackoverflow.com/a/8706144
-std::string getPythonInterpreterStackTrace() {
-  std::stringstream stack_trace;
-  AutoGIL gil;
-  PyThreadState *tstate = PyThreadState_GET();
-  if (NULL != tstate && NULL != tstate->frame) {
-    PyFrameObject *frame = tstate->frame;
-
-    while (NULL != frame) {
-      int line = PyCode_Addr2Line(frame->f_code, frame->f_lasti);
-      std::string filename = THPUtils_unpackString(frame->f_code->co_filename);
-      std::string funcname = THPUtils_unpackString(frame->f_code->co_name);
-      stack_trace << filename << "(" << line << "): " << funcname << "\n";
-      frame = frame->f_back;
-    }
-  }
-  return stack_trace.str();
-}
-}  // namespace
-
 Node* recordTrace(std::string op, // TODO: make this a Symbol
                   at::ArrayRef<Variable> inputs,
                   at::ArrayRef<Variable> outputs) {
@@ -126,7 +124,7 @@ Node* recordTrace(std::string op, // TODO: make this a Symbol
   // haven't actually specified what the locking contract is, be conservative.
   auto state_lock = state->lock();
 
-  Node *n = graph->create(stringToSymbol(op));
+  Node *n = graph->create(stringToSymbol(op), 0 /* initial outputs */);
   auto sl = std::make_shared<SourceLocation>(getPythonInterpreterStackTrace());
   n->setSourceLocation(sl);
 
@@ -137,18 +135,15 @@ Node* recordTrace(std::string op, // TODO: make this a Symbol
   // NB: Order matters. This must append after inputs but before outputs.
   graph->appendNode(n);
 
-  auto assignOutput = [&state](const Variable & output, Node * value) {
+  auto assignOutput = [&state](const Variable & output, Value * value) {
     if (output.defined()) {
       value->inferTypeFrom(output.data());
       setValueTrace(state, output, value);
     }
   };
-  if(outputs.size() == 1) {
-    assignOutput(outputs[0],n);
-  } else {
-    for(size_t i = 0; i < outputs.size(); i++) {
-      assignOutput(outputs[i], graph->appendNode(graph->createSelect(n, i)));
-    }
+
+  for(size_t i = 0; i < outputs.size(); i++) {
+    assignOutput(outputs[i], n->addOutput());
   }
 
   // Return the n so that attributes can be added.

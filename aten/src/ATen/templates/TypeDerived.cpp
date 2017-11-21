@@ -15,6 +15,7 @@
 #include "ATen/WrapDimUtils.h"
 #include "ATen/THLongStorageView.h"
 #include "ATen/UndefinedTensor.h"
+#include "ATen/NativeFunctions.h"
 #include <iostream>
 #include <sstream>
 
@@ -28,9 +29,9 @@ ScalarType ${Type}::scalarType() const {
 Backend ${Type}::backend() const {
   return Backend::${Backend};
 }
-bool ${Type}::isCuda() const { return backend() == kCUDA || backend() == kSparseCUDA; }
-bool ${Type}::isSparse() const { return backend() == kSparseCPU || backend() == kSparseCUDA; }
-bool ${Type}::isDistributed() const { return false; }
+bool ${Type}::is_cuda() const { return backend() == kCUDA || backend() == kSparseCUDA; }
+bool ${Type}::is_sparse() const { return backend() == kSparseCPU || backend() == kSparseCUDA; }
+bool ${Type}::is_distributed() const { return false; }
 
 std::unique_ptr<Storage> ${Type}::storage() const {
   return std::unique_ptr<Storage>(new ${Storage}(context));

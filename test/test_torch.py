@@ -8,6 +8,7 @@ import torch.cuda
 import tempfile
 import unittest
 import warnings
+import pickle
 from torch.utils.dlpack import from_dlpack, to_dlpack
 from itertools import product, combinations
 from common import TestCase, iter_indices, TEST_NUMPY, run_tests, download_file, skipIfNoLapack, \
@@ -1991,6 +1992,26 @@ class TestTorch(TestCase):
         torch.randn(SIZE, SIZE, out=res2)
         self.assertEqual(res1, res2)
 
+    def test_slice(self):
+        # TODO: remove the Variable wrapper once we merge Variable and Tensor
+        from torch.autograd import Variable
+        empty = Variable(torch.Tensor())
+        x = Variable(torch.arange(0, 16).view(4, 4))
+        self.assertEqual(x.slice(), x)
+        self.assertEqual(x.slice(0, 4), x)
+        # start and stop are clamped to the size of dim
+        self.assertEqual(x.slice(0, 5), x)
+        # if start >= stop then the result is empty
+        self.assertEqual(x.slice(2, 1), empty)
+        self.assertEqual(x.slice(2, 2), empty)
+        # out of bounds is also empty
+        self.assertEqual(x.slice(10, 12), empty)
+        # additional correctness checks
+        self.assertEqual(x.slice(0, 1).data.tolist(), [[0, 1, 2, 3]])
+        self.assertEqual(x.slice(0, -3).data.tolist(), [[0, 1, 2, 3]])
+        self.assertEqual(x.slice(-2, 3, dim=1).data.tolist(), [[2], [6], [10], [14]])
+        self.assertEqual(x.slice(0, -1, 2).data.tolist(), [[0, 1, 2, 3], [8, 9, 10, 11]])
+
     @skipIfNoLapack
     def test_gesv(self):
         a = torch.Tensor(((6.80, -2.11, 5.66, 5.97, 8.23),
@@ -3935,6 +3956,12 @@ class TestTorch(TestCase):
         self.assertEqual(perm, new)
         self.assertEqual(x.size(), orig)
 
+    def test_storage(self):
+        from torch.autograd import Variable
+        v = Variable(torch.randn(3, 5))
+        self.assertEqual(v.storage()[0], v.data[0][0])
+        self.assertEqual(v.storage()[14], v.data[2][4])
+
     def test_storageview(self):
         s1 = torch.LongStorage((3, 4, 5))
         s2 = torch.LongStorage(s1, 1)
@@ -4133,6 +4160,18 @@ class TestTorch(TestCase):
 
             rootview = c[8]
             self.assertEqual(rootview.data_ptr(), c[0].data_ptr())
+
+    def test_serialization_offset(self):
+        a = torch.randn(5, 5)
+        i = 41
+        with tempfile.TemporaryFile() as f:
+            pickle.dump(i, f)
+            torch.save(a, f)
+            f.seek(0)
+            j = pickle.load(f)
+            b = torch.load(f)
+            self.assertTrue(torch.equal(a, b))
+            self.assertEqual(i, j)
 
     def test_half_tensor(self):
         x = torch.randn(5, 5).float()

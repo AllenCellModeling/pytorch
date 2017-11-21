@@ -30,7 +30,6 @@ using namespace torch::jit;
 using at::Tensor;
 
 PyObject *THPFunctionClass = NULL;
-PyObject *THPStochasticFunctionClass = NULL;
 PyObject *THPBatchNormBackwardBackwardFunction = NULL;
 
 #define THPFunction_assert(condition, ...)                                     \
@@ -43,7 +42,7 @@ VariableInfo::VariableInfo(const Variable& var)
   , device(-1)
   , size(var.sizes())
   , requires_grad(var.requires_grad()) {
-  if (var.type().isCuda()) {
+  if (var.type().is_cuda()) {
     device = var.get_device();
   }
 }
@@ -301,7 +300,6 @@ PyObject *THPFunction_new(PyTypeObject *type, PyObject *args, PyObject *kwargs)
   new (&self->saved_variables) std::vector<SavedVariable>();
   new (&self->is_variable_input) std::vector<bool>();
   self->cdata.num_inputs = -1;
-  self->cdata.is_stochastic = PyObject_IsInstance(obj, THPStochasticFunctionClass);
   return obj;
 }
 
@@ -482,7 +480,8 @@ static void _save_variables(THPFunction* self, t2var_type &t2var)
           "tensors, but argument %d doesn't satisfy this condition", i);
     }
 
-    self->saved_variables.emplace_back(variable->cdata, cdata_ptr);
+    bool is_output = variable->cdata.grad_fn().get() == cdata_ptr;
+    self->saved_variables.emplace_back(variable->cdata, is_output);
   }
   // Free .to_save
   Py_DECREF(self->to_save);
@@ -661,7 +660,7 @@ static void _trace_create(PyObject* op_obj, THPFunction* bw_obj,
   // order.
 
   // See Note [getValueTrace can allocate nodes]
-  std::vector<Node*> value_traces;
+  std::vector<Value*> value_traces;
   value_traces.reserve(input_vars.size());
   for (auto& i : input_vars)
     value_traces.emplace_back(tracer::getValueTrace(tracing_state, i));
@@ -688,7 +687,7 @@ static void _trace_create(PyObject* op_obj, THPFunction* bw_obj,
     // NOTE: normally we don't add Select nodes when there's only a single
     // output, but Python nodes can't be optimized away, so we simplify the
     // code here.
-    Node* sel = graph->appendNode(graph->createSelect(this_expr, i));
+    auto sel = this_expr->addOutput();
     sel->inferTypeFrom(output.data());
     tracer::setValueTrace(tracing_state, output, sel);
   }
@@ -703,7 +702,7 @@ static void _trace_create(PyObject* op_obj, THPFunction* bw_obj,
   // subgraphs AND we don't even materialize the forward function).
   if (!passes_state_transparently) {
     tracer::nontraceableBackwardSubgraph(input_vars, output_vars);
-    Function::setUpContextEdge(this_expr, num_outputs, input_vars, output_vars);
+    Function::setUpContextEdge(this_expr, input_vars, output_vars);
   }
 }
 

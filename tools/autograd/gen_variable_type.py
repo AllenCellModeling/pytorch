@@ -18,11 +18,11 @@ except ImportError:
 
 
 METHOD_DECLARATION = CodeTemplate("""\
-virtual ${return_type} ${method_prefix}${api_name}(${formals}) const override;
+virtual ${return_type} ${method_prefix_derived}${api_name}(${formals}) const override;
 """)
 
 METHOD_DEFINITION = CodeTemplate("""\
-${return_type} VariableType::${method_prefix}${api_name}(${formals}) const {
+${return_type} VariableType::${method_prefix_derived}${api_name}(${formals}) const {
     ${type_definition_body}
 }
 """)
@@ -31,19 +31,19 @@ METHOD_DEFINITION_NYI = CodeTemplate("""\
 throw std::runtime_error("VariableType::${api_name} NYI");""")
 
 BASE_CALL = CodeTemplate("""\
-baseType->${method_prefix}${base_name}(${unpacked_args})""")
+baseType->${method_prefix_derived}${base_name}(${unpacked_args})""")
 
 METHOD_DEFINITION_FALLTHROUGH = CodeTemplate("""\
 ${unpack_args}
-return baseType->${method_prefix}${api_name}(${unpacked_args});""")
+return baseType->${method_prefix_derived}${api_name}(${unpacked_args});""")
 
 METHOD_DEFINITION_FALLTHROUGH_VARIABLE = CodeTemplate("""\
 ${unpack_args}
-return as_variable(baseType->${method_prefix}${api_name}(${unpacked_args}));""")
+return as_variable(baseType->${method_prefix_derived}${api_name}(${unpacked_args}));""")
 
 METHOD_DEFINITION_FALLTHROUGH_INPLACE = CodeTemplate("""\
 ${unpack_args}
-baseType->${method_prefix}${api_name}(${unpacked_args});
+baseType->${method_prefix_derived}${api_name}(${unpacked_args});
 increment_version(self);
 return self;
 """)
@@ -183,8 +183,8 @@ FALLTHROUGH_FUNCTIONS = {
     '__lshift__', '__or__', '__rshift__', '__xor__',
 }
 VIEW_FUNCTIONS = {
-    'as_strided', 'expand', 'narrow', 'permute', 'select', 'squeeze', 't',
-    'transpose', 'unfold', 'unsqueeze', 'view',
+    'alias', 'as_strided', 'expand', 'narrow', 'permute', 'select', 'slice',
+    'squeeze', 't', 'transpose', 'unfold', 'unsqueeze', 'view',
 }
 MANUAL_IMPLEMENTATIONS = {
     'contiguous', 'resize_', 'resize_as_'
@@ -458,7 +458,7 @@ def preprocess_nn_functions(declarations):
     for declaration in declarations:
         name = declaration['name']
         base_name = name[:-1] if declaration['inplace'] else name
-        if name == 'batch_norm' or 'conv' in name:
+        if name == 'batch_norm' or 'conv3d' in name:
             continue
 
         fwd_name = base_name + '_forward'
@@ -653,8 +653,7 @@ def create_variable_type(top_env, aten_declarations):
                     assert not is_output
                 if option['inplace'] and is_output:
                     var = 'self'
-                ptr = 'grad_fn.get()' if is_output else 'nullptr'
-                expr = 'SavedVariable({}, {})'.format(var, ptr)
+                expr = 'SavedVariable({}, {})'.format(var, str(is_output).lower())
             stmts.append('grad_fn->{} = {};'.format(name, expr))
         return stmts
 
@@ -672,10 +671,10 @@ def create_variable_type(top_env, aten_declarations):
         else:
             return ''
 
-    def unpack_args(env, option):
+    def unpack_args(env, declaration):
         body = []
         unpacked_args = []
-        for i, arg in enumerate(option['arguments']):
+        for i, arg in enumerate(declaration['arguments']):
             if not requires_unpack(arg):
                 unpacked_args.append(arg['name'])
                 continue
@@ -684,6 +683,9 @@ def create_variable_type(top_env, aten_declarations):
             is_nullable = arg.get('is_nullable', False)
             ref = (not is_nullable) and dynamic_type != 'TensorList'
             suffix = get_suffix(dynamic_type, is_nullable)
+            if dynamic_type == 'TensorList' and declaration['name'] == 'index':
+                # TODO: specify this in Declarations.yaml somehow
+                suffix = '_idxs'
 
             body.append(UNPACK_TENSOR.substitute(
                 arg_name=arg['name'],
@@ -693,8 +695,8 @@ def create_variable_type(top_env, aten_declarations):
             ))
             unpacked_args.append(arg['name'] + '_')
 
-        if option.get('derivative') is not None:
-            for arg in option['derivative'].get('buffers', []):
+        if declaration.get('derivative') is not None:
+            for arg in declaration['derivative'].get('buffers', []):
                 unpacked_args.append(arg + '_')
         env['unpacked_args'] = unpacked_args
         return body
@@ -837,7 +839,7 @@ def create_variable_type(top_env, aten_declarations):
                 env['result'] = CodeTemplate("{ ${outs} }").substitute(outs=diff_outs)
             env['trace_outputs'] = CodeTemplate("{ ${outs} }").substitute(outs=trace_outs)
 
-        if any(arg['simple_type'] in {'Generator', 'Storage'} for arg in arguments):
+        if any(arg['simple_type'] in {'Generator', 'Storage'} for arg in arguments) or declaration['name'] == 'index':
             env['record_trace'] = []
         else:
             env['record_trace'] = emit_record_trace(env, declaration)
@@ -891,8 +893,9 @@ def create_variable_type(top_env, aten_declarations):
         if skip_function(declaration):
             return
 
-        if declaration.get('derivative') is None and declaration['mode'] == 'native':
-            # native functions without a derivative don't need Type implementations
+        if not is_implemented(declaration) and declaration['mode'] == 'native':
+            # native functionsthat aren't implemented don't need Type implementations
+            # because they should dispatch to implemented functions.
             return
 
         env = {}
@@ -926,12 +929,6 @@ def load_aten_declarations(path):
         declaration['return_type'] = format_return_type(declaration['returns'])
 
         declaration['base_name'] = declaration['name']
-
-        # if the return value is missing a name, call it 'output'
-        for ret in declaration['returns']:
-            if 'name' not in ret:
-                assert len(declaration['returns']) == 1
-                ret['name'] = 'result'
 
         # Compute the Python function prototype for argument parsing
         typed_args = []
@@ -1025,7 +1022,9 @@ def gen_variable_type(declarations, out):
             return False
 
         # don't bind size or stride since the python signatures are different
-        if name in ['size', 'stride']:
+        # exclude alias from Python bindings as well at least for now
+        # exclude 'is_cuda' because for historical reasons it is a property.
+        if name in ['alias', 'size', 'stride', 'is_cuda'] or name.startswith('clamp'):
             return False
 
         if name.endswith('_backward'):

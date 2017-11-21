@@ -2,6 +2,7 @@
 
 #include <Python.h>
 #include <memory>
+#include "ATen/Type.h"
 
 #include "torch/csrc/autograd/function.h"
 #include "torch/csrc/autograd/variable.h"
@@ -17,6 +18,8 @@ struct Identity : public TraceableFunction {
 
 struct CopyBackwards : public Function {
   virtual variable_list apply(const variable_list& inputs) override;
+
+  at::Type *src_type;
 };
 
 struct Clone : public ForwardFunction<> {
@@ -100,6 +103,7 @@ struct CopySlices : public Function {
   CopySlices(const Variable& base, TensorGeometry view, std::shared_ptr<Function> fn);
 
   virtual variable_list apply(const variable_list& grads) override;
+  virtual void releaseVariables() override;
 
   TensorGeometry base;
   TensorGeometry view;

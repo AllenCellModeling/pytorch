@@ -86,6 +86,9 @@ struct Variable : public at::Tensor {
   inline bool is_view() const;
   inline Variable& base() const;
 
+  inline const std::string& name() const;
+  inline       std::string& name();
+
   inline Variable & operator=(Variable && rhs) &;
   inline Variable & operator=(const Variable & rhs) &;
   inline Variable & operator=(Tensor && rhs) &;
@@ -104,6 +107,7 @@ public:
   virtual at::Scalar localScalar() override;
   virtual void assign_(at::Scalar s) override;
   virtual void * unsafeGetTH(bool retain) override;
+  virtual std::unique_ptr<at::Storage> storage() override;
   static const char * typeString();
 
   // Get the VariableType for a base Tensor type
@@ -132,6 +136,8 @@ public:
   // correctly when this variable is passed to another function.
   int output_nr;
   PyObject *pyobj;  // weak reference
+
+  std::string name;
 
   // For use in torch::jit::tracer
   auto_unique_ptr<jit::tracer::ValueTracingState> tracing_state;
@@ -270,6 +276,13 @@ inline const bool& Variable::requires_grad() const {
 }
 inline bool& Variable::requires_grad() {
   return get()->requires_grad;
+}
+
+inline const std::string& Variable::name() const {
+  return get()->name;
+}
+inline std::string& Variable::name() {
+  return get()->name;
 }
 
 inline const bool& Variable::is_volatile() const {
