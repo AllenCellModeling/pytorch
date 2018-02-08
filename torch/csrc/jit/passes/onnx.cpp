@@ -24,19 +24,19 @@ bool hasUsedHandle(Node *node) {
 } // anonymous namespace
 
 // Transform PythonOps and Cpp Ops into Node's that match ONNX semantics.
-void ToONNX(std::shared_ptr<tracer::TracingState>& state) {
+// Argument aten indicates whether we should export ops as "ATen" ONNX ops if possible.
+void ToONNX(std::shared_ptr<tracer::TracingState>& state, bool aten) {
   // Check that the tracing state is live (it should be, because
   // you were supposed to request zero derivatives.)
   if (state->is_expired()) {
     throw std::logic_error("ToONNX: tracing state is expired");
   }
 
-  auto new_graph = std::make_shared<Graph>();
+  auto new_graph = std::make_shared<Graph>(state->graph->scope_root());
   std::unordered_map<void*, Value*> new_buffer_map;
 
   torch::autograd::SymbolicContext ctx;
   ctx.graph = new_graph.get();
-  ctx.buffer_map = &new_buffer_map;
   std::unordered_map<Value*, Value*> env;
 
   py::object onnx = py::module::import("torch.onnx");
@@ -150,9 +150,10 @@ void ToONNX(std::shared_ptr<tracer::TracingState>& state) {
         py_inputs[input_nr++] = py::cast(envFn(input));
     }
 
-    py::object raw_output = onnx.attr("_run_symbolic_function")(ctx.graph, n, py_inputs);
+    WithCurrentScope scope_guard(*ctx.graph, n->scope());
+    py::object raw_output = onnx.attr("_run_symbolic_function")(ctx.graph, n, py_inputs, aten);
 
-    processSymbolicOutput(symbolToString(n->kind()), n, raw_output);
+    processSymbolicOutput(n->kind().toString(), n, raw_output);
   };
 
   auto callPySymbolicMethod = [&](PythonOp* op) {
@@ -186,6 +187,7 @@ void ToONNX(std::shared_ptr<tracer::TracingState>& state) {
       py_symbolic_args[input_nr++] = obj;
     }
 
+    WithCurrentScope scope_guard(*ctx.graph, op->scope());
     // Call the symbolic function
     // Use a little trampoline function so we can give good error messages
     // upon argument mismatch
@@ -206,12 +208,7 @@ void ToONNX(std::shared_ptr<tracer::TracingState>& state) {
     // Needed so that symbolic calls create nodes with correct stages.
     auto stage_guard = new_graph->setStageTemporary(node->stage());
     IR_IFM(node, CppOp)
-      if (auto fn = std::dynamic_pointer_cast<autograd::HasSymbolic>(value->fn)) {
-        auto outputs = fn->symbolic(&ctx, fmap(node->inputs(), envFn), node->getSourceLocation());
-        setOutputs(value->name(), node, outputs);
-      } else {
-        cloneNode(node);
-      }
+      cloneNode(node);
     IR_ELSEIFM(PythonOp)
       callPySymbolicMethod(value);
     IR_ELSE()

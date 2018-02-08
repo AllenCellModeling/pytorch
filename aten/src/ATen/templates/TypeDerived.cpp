@@ -11,13 +11,22 @@
 #include "ATen/${Backend}IntTensor.h"
 #include "ATen/${Backend}LongTensor.h"
 #include "ATen/${SparseTensor}.h"
+#include "ATen/${DenseTensor}.h"
+#include "ATen/${DenseBackend}LongTensor.h"
+#include "ATen/Allocator.h"
 #include "ATen/Utils.h"
+#include "ATen/Half.h"
 #include "ATen/WrapDimUtils.h"
 #include "ATen/THLongStorageView.h"
 #include "ATen/UndefinedTensor.h"
 #include "ATen/NativeFunctions.h"
 #include <iostream>
 #include <sstream>
+
+#include "ATen/Config.h"
+#if AT_CUDA_ENABLED()
+$extra_cuda_headers
+#endif
 
 namespace at {
 
@@ -43,10 +52,19 @@ std::unique_ptr<Storage> ${Type}::storageFromBlob(void * data, int64_t size, con
     return std::unique_ptr<Storage>(
       new ${Storage}(context,data,size,deleter));
 }
+std::unique_ptr<Storage> ${Type}::storageWithAllocator(int64_t size, std::unique_ptr<Allocator> allocator) const {
+    return std::unique_ptr<Storage>(
+        new ${Storage}(context, size, std::move(allocator)));
+}
 Tensor ${Type}::unsafeTensorFromTH(void * th_pointer, bool retain) const {
   if (retain)
     ${THTensor}_retain(${state,} (${THTensor}*) th_pointer);
   return Tensor(new ${Tensor}(context,(${THTensor}*)(th_pointer)), false);
+}
+std::unique_ptr<Storage> ${Type}::unsafeStorageFromTH(void * th_pointer, bool retain) const {
+  if (retain)
+    ${THStorage}_retain(${state,} (${THStorage}*) th_pointer);
+  return std::unique_ptr<Storage>(new ${Storage}(context, (${THStorage}*) th_pointer));
 }
 std::unique_ptr<Generator> ${Type}::generator() const {
   return std::unique_ptr<Generator>(new ${Generator}(context));

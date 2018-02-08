@@ -78,7 +78,7 @@ using GraphsAttr = VectorAttributeValue<std::shared_ptr<Graph>,AttributeKind::gs
 
 // CRTP so that Node which inherits Attributes can be return for
 // method chaining e.g:
-// Node * n = g->create(kSelect)->set_i(kOffset,3)->set_f(kValue,3.5);
+// Node * n = g->create(kSelect)->i_(kOffset,3)->f_(kValue,3.5);
 // we return Derived* pointers because Nodes are normally held as pointers.
 template<typename Derived>
 struct Attributes {
@@ -171,7 +171,7 @@ private:
       return v->name == name;
     });
     if(required && it == values_.end()) {
-      ::torch::barf("%s:%u: %s: required undefined attribute '%s'", __FILE__, __LINE__, __func__, symbolToString(name));
+      ::torch::barf("%s:%u: %s: required undefined attribute '%s'", __FILE__, __LINE__, __func__, name.toString());
     }
     JIT_ASSERT(!required || it != values_.end());
     return it;

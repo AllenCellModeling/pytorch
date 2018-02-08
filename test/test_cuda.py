@@ -9,7 +9,7 @@ import torch.cuda
 import torch.cuda.comm as comm
 
 from test_torch import TestTorch
-from common import TestCase, get_gpu_type, to_gpu, freeze_rng_state, run_tests
+from common import TestCase, get_gpu_type, to_gpu, freeze_rng_state, run_tests, IS_WINDOWS
 
 HAS_CUDA = True
 if not torch.cuda.is_available():
@@ -97,6 +97,10 @@ def medium_2d(t):
     return make_tensor(t, M, M)
 
 
+def medium_2d_expanded(t):
+    return t(1).expand(M, M)
+
+
 def medium_2d_scaled(t, scale=10):
     return make_tensor(t, M, M).mul(scale)
 
@@ -143,6 +147,13 @@ def new_t(*sizes):
         return t(*sizes).copy_(torch.randn(*sizes))
     return tmp
 
+# Content of each tuple:
+# - function name
+# - constructor for the tensor,    signature: fn(tensor_type) -> tensor
+# - constructor for the arguments, signature: fn(tensor_type) -> list
+# - postfix name for the test (must be unique for a given function) (default='')
+# - tensor types to use (default=types)
+# - disable inplace test, if set to True, no inplace test will be done (default=False)
 tests = [
     ('add', small_3d, lambda t: [number(3.14, 3, t)]),
     ('add', small_3d, lambda t: [small_3d_positive(t)], 'tensor'),
@@ -180,7 +191,7 @@ tests = [
     ('addr', medium_2d, lambda t: [medium_1d(t), medium_1d(t)],),
     ('addr', medium_2d, lambda t: [number(0.4, 2, t), medium_1d(t), medium_1d(t)], 'scalar'),
     ('addr', medium_2d, lambda t: [number(0.5, 3, t), number(0.4, 2, t), medium_1d(t), medium_1d(t)], 'two_scalars'),
-    ('atan2', medium_2d, lambda t: [medium_2d(t)], None, float_types),
+    ('atan2', medium_2d, lambda t: [medium_2d(t)], None, float_types + [torch.HalfTensor]),
     ('fmod', small_3d, lambda t: [3], 'value'),
     ('fmod', small_3d, lambda t: [small_3d_positive(t)], 'tensor'),
     ('chunk', medium_2d, lambda t: [4],),
@@ -260,6 +271,7 @@ tests = [
     ('ones', small_3d, lambda t: [1, 2, 3, 4, 5],),
     ('permute', new_t(1, 2, 3, 4), lambda t: [2, 1, 3, 0],),
     ('put_', new_t(2, 5, 3), lambda t: [long_type(t)([[0], [-2]]), t([[3], [4]])],),
+    ('put_', new_t(2, 3), lambda t: [long_type(t)([]), t([])], 'empty'),
     ('put_', new_t(2, 2), lambda t: [long_type(t)([[1], [-3]]), t([[1], [2]]), True], 'accumulate'),
     ('prod', small_2d_oneish, lambda t: [],),
     ('prod', small_3d, lambda t: [1], 'dim'),
@@ -295,14 +307,16 @@ tests = [
     ('topk', small_3d_unique, lambda t: [2, 1, True, True], 'dim_desc_sort'),
     ('trace', medium_2d, lambda t: [],),
     ('tril', medium_2d, lambda t: [],),
+    ('tril', medium_2d_expanded, lambda t: [], 'zero_stride', types, True),
     ('tril', medium_2d, lambda t: [2], 'positive'),
     ('tril', medium_2d, lambda t: [-2], 'negative'),
     ('triu', medium_2d, lambda t: [],),
+    ('triu', medium_2d_expanded, lambda t: [], 'zero_stride', types, True),
     ('triu', medium_2d, lambda t: [2], 'positive'),
     ('triu', medium_2d, lambda t: [-2], 'negative'),
     ('unsqueeze', new_t(2, 3, 4), lambda t: [2],),
     ('unsqueeze', new_t(2, 3, 4), lambda t: [-2], 'neg_dim'),
-    ('view', small_3d, lambda t: [100, 10],),
+    ('view', small_3d, lambda t: [100, 10], 'contiguous'),
     ('view_as', small_3d, lambda t: [t(100, 10)],),
     ('zero', small_3d, lambda t: [],),
     ('zeros', small_3d, lambda t: [1, 2, 3, 4],),
@@ -314,10 +328,13 @@ tests = [
     ('qr', small_2d_lapack, lambda t: [], 'square', float_types),
     ('qr', small_2d_lapack_skinny, lambda t: [], 'skinny', float_types),
     ('qr', small_2d_lapack_fat, lambda t: [], 'fat', float_types),
-    ('qr', large_2d_lapack, lambda t: [], 'big', float_types),
     ('inverse', new_t(20, 20), lambda t: [], None, float_types),
-
+    ('geqrf', new_t(20, 20), lambda t: [], None, float_types),
+    # TODO: add det to here once Variable and Tensor are the same thing
 ]
+
+if not IS_WINDOWS:
+    tests.append(('qr', large_2d_lapack, lambda t: [], 'big', float_types))
 
 # TODO: random functions, cat, gather, scatter, index*, masked*,
 #       resize, resizeAs, storage_offset, storage, stride, unfold
@@ -331,6 +348,7 @@ custom_precision = {
     'rsqrt': 1e-4,
     'cumprod': 1e-4,
     'qr': 3e-4,
+    'digamma': 1e0,  # large values lead to large absolute error but small relative error
 }
 
 simple_pointwise = [
@@ -355,6 +373,7 @@ simple_pointwise_float = [
     'erf',
     'erfinv',
     'exp',
+    'expm1',
     'reciprocal',
     'floor',
     'frac',
@@ -362,6 +381,9 @@ simple_pointwise_float = [
     'round',
     'trunc',
     'ceil',
+    'lgamma',
+    'digamma',
+    'trigamma',
 ]
 
 for fn in simple_pointwise_float:
@@ -395,7 +417,7 @@ def compare_cpu_gpu(tensor_constructor, arg_constructor, fn, t, precision=1e-5):
             gpu_result = getattr(gpu_tensor, fn)(*gpu_args)
         except RuntimeError as e:
             reason = e.args[0]
-            if 'unimplemented data type' in reason:
+            if 'only supports floating-point types' in reason or 'unimplemented data type' in reason:
                 raise unittest.SkipTest('unimplemented data type')
             raise
         except AttributeError as e:
@@ -413,21 +435,202 @@ def compare_cpu_gpu(tensor_constructor, arg_constructor, fn, t, precision=1e-5):
 
 class TestCuda(TestCase):
 
+    @staticmethod
+    def _test_memory_stats_generator(self, device=None, N=35):
+        if device is None:
+            device = torch.cuda.current_device()
+
+        m0 = torch.cuda.memory_allocated(device)
+        last_m_arr = [torch.cuda.memory_allocated(device)]
+        max_m_arr = [torch.cuda.max_memory_allocated(device)]
+        last_c_arr = [torch.cuda.memory_cached(device)]
+        max_c_arr = [torch.cuda.max_memory_cached(device)]
+
+        def alloc(*size):
+            with torch.cuda.device(device):
+                # NOTE: do **not** use methods that can have additional
+                #       memory overhead, e.g., inplace random sampling methods.
+                #       they can leave some memory occupied even after being
+                #       deallocated, e.g., initialized RNG state, causing some
+                #       memory checks below to fail.
+                return torch.cuda.FloatTensor(*size)
+
+        def assert_change(comp=1, empty_cache=False):
+            # comp > 0: increased
+            # comp = 0: equal
+            # comp < 0: decreased
+            new_m = torch.cuda.memory_allocated(device)
+            new_max_m = torch.cuda.max_memory_allocated(device)
+            if comp > 0:
+                self.assertGreater(new_m, last_m_arr[0])
+            elif comp < 0:
+                self.assertLess(new_m, last_m_arr[0])
+            else:
+                self.assertEqual(new_m, last_m_arr[0])
+            self.assertLessEqual(new_m, new_max_m)
+            self.assertGreaterEqual(new_max_m, max_m_arr[0])
+            last_m_arr[0] = new_m
+            max_m_arr[0] = new_max_m
+
+            new_c = torch.cuda.memory_cached(device)
+            new_max_c = torch.cuda.max_memory_cached(device)
+            # emptying cache may happen (due to allocation or empty_cache), so
+            # we can't assert new_c >= last_c
+            self.assertLessEqual(new_c, new_max_c)
+            self.assertGreaterEqual(new_max_c, max_c_arr[0])
+            last_c_arr[0] = new_c
+            max_c_arr[0] = new_max_c
+
+            if empty_cache:
+                torch.cuda.empty_cache()
+                new_c = torch.cuda.memory_cached(device)
+                new_max_c = torch.cuda.max_memory_cached(device)
+                self.assertLessEqual(new_c, last_c_arr[0])
+                self.assertLessEqual(new_c, new_max_c)
+                self.assertEqual(new_max_c, max_c_arr[0])
+                last_c_arr[0] = new_c
+
+        assert_change(0)
+        assert_change(0)
+        yield
+
+        tensors1 = [alloc(1), alloc(10, 20), alloc(200, 300, 2000)]
+        m1 = torch.cuda.memory_allocated(device)
+        assert_change(1)
+        yield
+
+        tensors2 = []
+
+        for i in range(1, int(N / 2) + 1):
+            # small ones
+            tensors2.append(alloc(i, i * 4))
+            assert_change(1)
+            yield
+
+        for i in range(5, int(N / 2) + 5):
+            # large ones
+            tensors2.append(alloc(i, i * 7, i * 9, i * 11))
+            assert_change(1)
+            yield
+
+        tensors2.append(alloc(0, 0, 0))
+        assert_change(0)
+        yield
+
+        permute = []
+        for i in torch.randperm(len(tensors2)):
+            permute.append(tensors2[i])
+            assert_change(0)
+            yield
+
+        del tensors2
+        assert_change(0)
+        yield
+        tensors2 = permute
+        assert_change(0)
+        yield
+        del permute
+        assert_change(0)
+        yield
+
+        for i in range(int(N / 2)):
+            x = tensors2[i].numel()
+            del tensors2[i]
+            assert_change(-x)  # in case that tensors2[i] is empty
+            yield
+
+        for i in range(2, int(2 * N / 3) + 2):
+            tensors2.append(alloc(i, i * 3, i * 8))
+            assert_change(1)
+            yield
+
+        del tensors2
+        assert_change(-1)
+        assert_change(0)
+        self.assertEqual(torch.cuda.memory_allocated(device), m1)
+        yield True
+
+        del tensors1
+        assert_change(-1)
+        self.assertEqual(torch.cuda.memory_allocated(device), m0)
+
+        # test empty_cache
+        assert_change(0, empty_cache=True)
+
+    def test_memory_stats(self):
+        torch.cuda.empty_cache()
+        for _ in self._test_memory_stats_generator(self):
+            pass
+
     @unittest.skipIf(torch.cuda.device_count() < 2, "only one GPU detected")
-    def test_autogpu(self):
-        x = torch.randn(5, 5).cuda()
-        y = torch.randn(5, 5).cuda()
+    def test_memory_stats_multigpu(self):
+        # advance a generator with a end flag
+        def advance(gen, end):
+            if not end:
+                try:
+                    next(gen)
+                except StopIteration:
+                    end = True
+            return end
+
+        # interlace
+        torch.cuda.empty_cache()
+        gen0 = self._test_memory_stats_generator(self, device=0, N=35)
+        gen1 = self._test_memory_stats_generator(self, device=1, N=35)
+        end0 = end1 = False
+        while not (end0 and end1):
+            end0 = advance(gen0, end0)
+            end1 = advance(gen1, end1)
+
+        # semi-random order
+        torch.cuda.empty_cache()
+        gen0 = self._test_memory_stats_generator(self, device=0, N=35)
+        gen1 = self._test_memory_stats_generator(self, device=1, N=35)
+        end0 = end1 = False
+
+        while not (end0 and end1):
+            end0 = advance(gen0, end0)
+            if not end0:
+                gen1_max_times = torch.LongTensor(1).random_(0, 3)[0]
+            else:
+                gen1_max_times = float('inf')
+            t = 0
+            while t < gen1_max_times and not end1:
+                end1 = advance(gen1, end1)
+                t += 1
+
+    @unittest.skipIf(torch.cuda.device_count() < 2, "only one GPU detected")
+    def _test_autogpu(self, TensorCtor):
+        x = TensorCtor().cuda()
+        y = TensorCtor().cuda()
         self.assertEqual(x.get_device(), 0)
         self.assertEqual(x.get_device(), 0)
         with torch.cuda.device(1):
-            z = torch.randn(5, 5).cuda()
+            z = TensorCtor().cuda()
             self.assertEqual(z.get_device(), 1)
             q = x.add(y)
             self.assertEqual(q.get_device(), 0)
-            w = torch.randn(5, 5).cuda()
+            w = TensorCtor().cuda()
             self.assertEqual(w.get_device(), 1)
+            self.assertEqual(y.cuda().get_device(), 1)
+            self.assertEqual(y.cuda(-1).get_device(), 1)
         z = z.cuda()
         self.assertEqual(z.get_device(), 0)
+
+    def test_autogpu(self):
+        # TODO: clean-up and merge with above code after Variable and Tensor
+        # are merged
+        self._test_autogpu(lambda: torch.randn(5, 5))
+        self._test_autogpu(lambda: torch.autograd.Variable(torch.randn(5, 5)))
+
+    @unittest.skipIf(torch.cuda.device_count() < 2, "only one GPU detected")
+    def test_new(self):
+        x = torch.autograd.Variable(torch.randn(3, 3).cuda())
+        self.assertEqual(x.new([0, 1, 2]).get_device(), 0)
+        self.assertEqual(x.new([0, 1, 2], device=1).get_device(), 1)
+        with torch.cuda.device(1):
+            self.assertEqual(x.new([0, 1, 2]).get_device(), 0)
+            self.assertEqual(x.new([0, 1, 2], device=1).get_device(), 1)
 
     @unittest.skipIf(torch.cuda.device_count() < 2, "only one GPU detected")
     def test_copy_device(self):
@@ -502,7 +705,7 @@ class TestCuda(TestCase):
         self._test_broadcast(torch.randn(5, 5))
 
     def test_broadcast_gpu(self):
-        self._test_broadcast(torch.randn(5, 5))
+        self._test_broadcast(torch.randn(5, 5).cuda())
 
     @staticmethod
     def _test_broadcast_coalesced(self, tensors, buffer_size):
@@ -713,6 +916,45 @@ class TestCuda(TestCase):
         z = torch.cat([x, y], 0)
         self.assertEqual(z.get_device(), x.get_device())
 
+    def test_cat(self):
+        SIZE = 10
+        for dim in range(-3, 3):
+            pos_dim = dim if dim >= 0 else 3 + dim
+            x = torch.rand(13, SIZE, SIZE).transpose(0, pos_dim).cuda()
+            y = torch.rand(17, SIZE, SIZE).transpose(0, pos_dim).cuda()
+            z = torch.rand(19, SIZE, SIZE).transpose(0, pos_dim).cuda()
+
+            res1 = torch.cat((x, y, z), dim)
+            self.assertEqual(res1.narrow(pos_dim, 0, 13), x, 0)
+            self.assertEqual(res1.narrow(pos_dim, 13, 17), y, 0)
+            self.assertEqual(res1.narrow(pos_dim, 30, 19), z, 0)
+
+        x = torch.randn(20, SIZE, SIZE).cuda()
+        self.assertEqual(torch.cat(torch.split(x, 7)), x)
+        self.assertEqual(torch.cat(torch.chunk(x, 7)), x)
+
+        y = torch.randn(1, SIZE, SIZE).cuda()
+        z = torch.cat([x, y])
+        self.assertEqual(z.size(), (21, SIZE, SIZE))
+
+    def test_bernoulli_variable(self):
+        # TODO: delete when tensor/variable are merged
+        from torch.autograd import Variable
+        x = torch.cuda.FloatTensor([0, 1]).cuda()
+        x_var = Variable(x)
+        self.assertEqual(x_var.bernoulli().data, x.bernoulli())
+
+    def test_cat_bad_input_sizes(self):
+        x = torch.randn(2, 1).cuda()
+        y = torch.randn(2, 1, 1).cuda()
+        z = torch.randn(2, 1, 1).cuda()
+        self.assertRaises(RuntimeError, lambda: torch.cat([x, y, z]))
+
+        x = torch.randn(2, 1, 2).cuda()
+        y = torch.randn(2, 1, 1).cuda()
+        z = torch.randn(2, 2, 1).cuda()
+        self.assertRaises(RuntimeError, lambda: torch.cat([x, y, z], dim=1))
+
     def test_serialization(self):
         x = torch.randn(4, 4).cuda()
         with tempfile.NamedTemporaryFile() as f:
@@ -810,7 +1052,7 @@ class TestCuda(TestCase):
         self.assertTrue(user_stream.query())
         # copy 10 MB tensor from CPU-GPU which should take some time
         tensor1 = torch.ByteTensor(10000000).pin_memory()
-        tensor2 = tensor1.cuda(async=True)
+        tensor2 = tensor1.cuda(non_blocking=True)
         self.assertFalse(default_stream.query())
         default_stream.synchronize()
         self.assertTrue(default_stream.query())
@@ -858,7 +1100,7 @@ class TestCuda(TestCase):
         # Performs the CPU->GPU copy in a background stream
         def perform_copy():
             with torch.cuda.stream(stream):
-                tmp = t.cuda(async=True)
+                tmp = t.cuda(non_blocking=True)
                 ptr[0] = tmp.data_ptr()
             torch.cuda.current_stream().wait_stream(stream)
             tmp.record_stream(torch.cuda.current_stream())
@@ -897,7 +1139,7 @@ class TestCuda(TestCase):
         # check that the allocation is not re-used if it's in-use by a copy
         gpu_tensor = torch.cuda.FloatTensor([0])
         torch.cuda._sleep(int(50 * cycles_per_ms))  # delay the copy
-        gpu_tensor.copy_(t, async=True)
+        gpu_tensor.copy_(t, non_blocking=True)
         del t
         t = torch.FloatTensor([1]).pin_memory()
         self.assertNotEqual(t.data_ptr(), ptr, 'allocation re-used too soon')
@@ -916,14 +1158,14 @@ class TestCuda(TestCase):
 
         with torch.cuda.device(1):
             torch.cuda._sleep(int(50 * cycles_per_ms))  # delay the copy
-            gpu_tensor1.copy_(t, async=True)
+            gpu_tensor1.copy_(t, non_blocking=True)
 
         del t
         t = torch.FloatTensor([2]).pin_memory()
         self.assertNotEqual(t.data_ptr(), ptr, 'allocation re-used too soon')
 
         with torch.cuda.device(0):
-            gpu_tensor0.copy_(t, async=True)
+            gpu_tensor0.copy_(t, non_blocking=True)
 
         self.assertEqual(gpu_tensor1[0], 1)
         self.assertEqual(gpu_tensor0[0], 2)
@@ -931,6 +1173,19 @@ class TestCuda(TestCase):
     @staticmethod
     def _select_broadcastable_dims(dims_full=None):
         return TestTorch._select_broadcastable_dims(dims_full)
+
+    @unittest.skipIf(not HAS_MAGMA, "no MAGMA library detected")
+    def test_det(self):
+        TestTorch._test_det(self, lambda t: t.cuda())
+
+    def test_view(self):
+        TestTorch._test_view(self, lambda t: t.cuda())
+
+    def test_stft(self):
+        TestTorch._test_stft(self, lambda t: t.cuda())
+
+    def test_multinomial(self):
+        TestTorch._test_multinomial(self, torch.cuda.FloatTensor)
 
     def test_broadcast(self):
         TestTorch._test_broadcast(self, lambda t: t.cuda())
@@ -1026,6 +1281,41 @@ class TestCuda(TestCase):
         tensor = tensor.unsqueeze(1)
         self.assertEqual(tensor.var(0)[0], 0.03125)
 
+    def test_digamma(self):
+        def test(use_double=False):
+            cpu_tensor = torch.randn(10, 10, 10)
+            gpu_tensor = cpu_tensor.cuda()
+            zeros = torch.zeros(10, 10, 10)
+            if (use_double):
+                cpu_tensor = cpu_tensor.double()
+                gpu_tensor = gpu_tensor.double()
+                zeros = zeros.double()
+            cpu_out = cpu_tensor.digamma()
+            gpu_out = gpu_tensor.digamma()
+            norm_errors = (gpu_out - cpu_out.cuda()) / gpu_out
+            self.assertEqual(norm_errors, zeros)
+
+        test(True)
+        test(False)
+
+    def test_polygamma(self):
+        def test(use_double=False):
+            cpu_tensor = torch.randn(10, 10, 10)
+            gpu_tensor = cpu_tensor.cuda()
+            zeros = torch.zeros(10, 10, 10)
+            if (use_double):
+                cpu_tensor = cpu_tensor.double()
+                gpu_tensor = gpu_tensor.double()
+                zeros = zeros.double()
+            for n in [0, 1]:
+                cpu_out = cpu_tensor.polygamma(n)
+                gpu_out = gpu_tensor.polygamma(n)
+                norm_errors = (gpu_out - cpu_out.cuda()) / gpu_out
+                self.assertEqual(norm_errors, zeros)
+
+        test(True)
+        test(False)
+
     @unittest.skipIf(not HAS_MAGMA, "no MAGMA library detected")
     def test_symeig(self):
         # Small case
@@ -1071,18 +1361,27 @@ if HAS_CUDA:
         for t in types:
             tensor = t()
             gpu_tensor = get_gpu_type(t)()
+
+            # Default values
+            desc = ''
+            type_subset = types
+            no_inplace = False
             if len(decl) == 3:
                 name, constr, arg_constr = decl
-                desc = ''
             elif len(decl) == 4:
                 name, constr, arg_constr, desc = decl
             elif len(decl) == 5:
                 name, constr, arg_constr, desc, type_subset = decl
-                if t not in type_subset:
-                    continue
+            elif len(decl) == 6:
+                name, constr, arg_constr, desc, type_subset, no_inplace = decl
+
+            if t not in type_subset:
+                continue
 
             precision = custom_precision.get(name, TestCuda.precision)
             for inplace in (True, False):
+                if inplace and no_inplace:
+                    continue
                 if inplace:
                     name_inner = name + '_'
                 else:
@@ -1099,7 +1398,9 @@ if HAS_CUDA:
                     test_name += '_' + desc
 
                 assert not hasattr(TestCuda, test_name), "Duplicated test name: " + test_name
-                setattr(TestCuda, test_name, compare_cpu_gpu(constr, arg_constr, name_inner, t, precision))
+                setattr(TestCuda,
+                        test_name,
+                        compare_cpu_gpu(constr, arg_constr, name_inner, t, precision))
 
 
 if __name__ == '__main__':

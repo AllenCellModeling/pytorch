@@ -1,8 +1,30 @@
 #include "torch/csrc/autograd/functions/special.h"
 
+#include "torch/csrc/assertions.h"
 #include "torch/csrc/autograd/python_engine.h"
+#include "torch/csrc/autograd/edge.h"
+#include "torch/csrc/autograd/function.h"
+
+#include <cstdint>
+#include <memory>
+#include <unordered_map>
+#include <unordered_set>
+#include <vector>
 
 namespace torch { namespace autograd {
+
+// Used when an output has multiple uses (there's only one entry
+// in next_functions per output).
+struct Replicate : public Function {
+  Replicate() {
+    num_inputs = 1;
+  }
+
+  virtual variable_list apply(const variable_list& inputs) {
+		TORCH_ASSERT(inputs.size() == 1);
+    return variable_list(next_functions.size(), inputs[0]);
+  }
+};
 
 // Note [Null-edge pruning]
 // Evals have a problem with null edges appearing in the graph, because there's
@@ -38,11 +60,11 @@ auto Eval::getSubgraph(const variable_list& inputs, const variable_list& outputs
   input_edges.reserve(inputs.size());
   for (auto & input : inputs) {
     if (!input.defined()) continue;
-    input_edges.emplace(input.grad_fn() ? input.grad_fn() : input.grad_accumulator(), input.output_nr());
+    input_edges.emplace(input.gradient_edge());
   }
 
   // This is used to stop the search in situation 2 and find the corresponding placeholders.
-  std::unordered_map<edge_type, std::shared_ptr<EvalOutput>, edge_hasher> inherited_edges;
+  std::unordered_map<Edge, std::shared_ptr<EvalOutput>> inherited_edges;
   inherited_edges.reserve(inherited_placeholders.size());
   for (auto & placeholder : inherited_placeholders) {
     input_edges.emplace(placeholder->next_edge);
@@ -66,7 +88,7 @@ auto Eval::getSubgraph(const variable_list& inputs, const variable_list& outputs
     int num_edges = fn->next_functions.size();
     for (int i = 0; i < num_edges; ++i) {
       auto & edge = fn->next_functions[i];
-      auto & next_fn = edge.first;
+      auto & next_fn = edge.function;
       if (!next_fn) continue; // See Note [Null-edge pruning]
       // Edge belongs to subgraph boundary. Register that and don't search along it.
       if (input_edges.count(edge) > 0) {
@@ -129,9 +151,8 @@ bool Eval::trySimpleEval(const variable_list& inputs, const variable_list& outpu
     // attempt the optimization in this case.  To fix it properly,
     // we'd need to filter grad_next_fns and outputs of apply in Eval::apply.
     // The check below tests if null edge pruning occurred.
-    if (!inputs[i].defined() || !grad_next_fns[i].first) return false;
-    const auto& input_grad = inputs[i].grad_fn() ? inputs[i].grad_fn() : inputs[i].grad_accumulator();
-    if (grad_next_fns[i].first != input_grad || grad_next_fns[i].second != inputs[i].output_nr()) return false;
+    if (!inputs[i].defined() || !grad_next_fns[i].is_valid()) return false;
+    if (grad_next_fns[i] != inputs[i].gradient_edge()) return false;
   }
 
   // Success! We still need to set up placeholders for next stages and to drop
@@ -144,7 +165,6 @@ bool Eval::trySimpleEval(const variable_list& inputs, const variable_list& outpu
     grad_next_fns.emplace_back(placeholder, 0);
     placeholders.emplace_back(std::move(placeholder));
   }
-  is_executable = grad_fn->is_executable;
   simple_graph = grad_fn;
   grad_fn->tracing_state->in_eval_subgraph = true;
   return true;
@@ -160,12 +180,12 @@ variable_list Eval::filterRelevantOutputs(const variable_list& inputs, const var
   ignored_grad_fns.reserve(inputs.size());
   for (auto& input : inputs) {
     if (!input.defined()) continue;
-    ignored_grad_fns.emplace(input.grad_fn(), input.output_nr());
+    ignored_grad_fns.insert(input.gradient_edge());
   }
   for (auto& output : outputs) {
     if (!output.defined()) continue;
     if (!output.grad_fn()) continue;
-    if (ignored_grad_fns.count(std::make_pair(output.grad_fn(), output.output_nr())) > 0) continue;
+    if (ignored_grad_fns.count(output.gradient_edge()) > 0) continue;
     relevant_outputs.emplace_back(output);
   }
   return relevant_outputs;
@@ -176,10 +196,7 @@ auto Eval::computeInputOrder(const variable_list& inputs, const placeholder_list
   int idx = 0;
   for (auto & input : inputs) {
     if (!input.defined()) continue;
-    input_order.emplace(
-      std::make_pair(input.grad_fn() ? input.grad_fn() : input.grad_accumulator(), input.output_nr()),
-      idx++
-    );
+    input_order.emplace(input.gradient_edge(), idx++);
   }
   for (auto & placeholder : inherited_placeholders)
     input_order.emplace(placeholder->next_edge, idx++);
@@ -200,12 +217,12 @@ bool Eval::replaceSubgraph(const variable_list& inputs, const variable_list& _ou
   if (!trySimpleEval(inputs, relevant_outputs, inherited_placeholders)) {
     roots.reserve(relevant_outputs.size());
     for (auto & output : relevant_outputs)
-      roots.emplace_back(output.grad_fn(), output.output_nr());
+      roots.push_back(output.gradient_edge());
 
     auto subgraph = getSubgraph(inputs, relevant_outputs, inherited_placeholders);
 
     // Prepare output placeholder nodes for each end.
-    std::unordered_map<edge_type, std::shared_ptr<EvalOutput>, edge_hasher> ends_to_outputs;
+    std::unordered_map<Edge, std::shared_ptr<EvalOutput>> ends_to_outputs;
     for (auto & placeholder : placeholders) {
       ends_to_outputs[placeholder->next_edge] = placeholder;
     }
@@ -218,20 +235,17 @@ bool Eval::replaceSubgraph(const variable_list& inputs, const variable_list& _ou
 
     // Replace begins with pointers to output nodes.
     // This detaches the subgraph from the full backward graph.
-    for (auto & begin : subgraph.boundary.begins) {
-      auto & fn = begin.first;
-      auto offset = begin.second;
-      fn->next_functions[offset] = std::make_pair(ends_to_outputs.at(fn->next_functions[offset]), 0);
+    for (auto& begin : subgraph.boundary.begins) {
+      auto& fn = begin.function->next_functions[begin.input_nr];
+      fn = Edge(ends_to_outputs.at(fn), 0);
     }
 
     // Replace subgraph with this node.
     next_functions.insert(next_functions.begin(), subgraph.boundary.ends.begin(), subgraph.boundary.ends.end());
-    is_executable = std::any_of(relevant_outputs.begin(), relevant_outputs.end(),
-                                [](const Variable& var) { return var.requires_grad(); });
 
     // Ensure placeholders and inputs are sorted in the same way.
     edge_order input_order = computeInputOrder(inputs, inherited_placeholders);
-    std::sort(next_functions.begin(), next_functions.end(), [&input_order](const edge_type &a, const edge_type &b) {
+    std::sort(next_functions.begin(), next_functions.end(), [&input_order](const Edge &a, const Edge &b) {
       return input_order.at(a) < input_order.at(b);
     });
     std::sort(placeholders.begin(), placeholders.end(), [&input_order](const std::shared_ptr<EvalOutput> &a, const std::shared_ptr<EvalOutput> &b) {
@@ -240,9 +254,32 @@ bool Eval::replaceSubgraph(const variable_list& inputs, const variable_list& _ou
   }
 
   // Rebase outputs.
+  auto this_shared = shared_from_this();
+  std::unordered_set<Variable*> repeated_outputs;
+  // NB: every output can be in 3 states:
+  // - unique so far - only the else of second if is taken
+  // - repeated first time - first if + first branch of second if
+  // - repeated many times - first branch of second if only
   for (auto & output : relevant_outputs) {
-    output.get()->_grad_fn = shared_from_this();
-    output.get()->output_nr = num_inputs++;
+    // This output is already rebased. This happens when there
+    // the same Variable has been returned multiple times, and
+    // is repeated in this list.
+    if (output.get()->_grad_fn.get() == this) {
+      auto replicate = std::make_shared<Replicate>();
+      replicate->next_functions.emplace_back(this_shared, output.output_nr());
+      output.get()->_grad_fn = replicate;
+      output.get()->output_nr = 0;
+      repeated_outputs.emplace(&output);
+    }
+    // NOTE: this check should be fairly cheap, and the set shouldn't
+    // perform any allocations until we actually see repeated outputs.
+    if (repeated_outputs.count(&output) > 0) {
+      auto & replicate = output.grad_fn();
+      replicate->next_functions.emplace_back(this_shared, num_inputs++);
+    } else {
+      output.get()->_grad_fn = this_shared;
+      output.get()->output_nr = num_inputs++;
+    }
   }
 
   return true;
@@ -253,11 +290,12 @@ variable_list Eval::apply(const variable_list& inputs) {
   if (simple_graph) {
     outputs = (*simple_graph)(inputs);
   } else {
-    std::mutex outputs_mutex;
-    outputs.resize(placeholders.size());
     auto& engine = python::PythonEngine::getDefaultEngine();
     auto exec_data = filterRoots(inputs);
-    engine.execute(exec_data.first, exec_data.second, true, getCallbacks(outputs, outputs_mutex));
+    auto output_edges = fmap(
+        placeholders,
+        [](const std::shared_ptr<EvalOutput>& o) { return Edge(o, 0); });
+    outputs = engine.execute(exec_data.first, exec_data.second, true, true, output_edges);
   }
 
   auto bw_eval = newEval();
@@ -303,22 +341,6 @@ std::pair<function_list, variable_list> Eval::filterRoots(const variable_list& i
     filtered_roots.emplace_back(roots[i]);
   }
   return std::make_pair(std::move(filtered_roots), std::move(filtered_inputs));
-}
-
-Engine::pre_callback_map Eval::getCallbacks(variable_list& outputs, std::mutex& outputs_mutex) {
-  Engine::pre_callback_map callbacks;
-  int num_outputs = placeholders.size();
-  for (int i = 0; i < num_outputs; ++i) {
-    auto& output_fn = placeholders[i];
-    callbacks.emplace(output_fn.get(), [&outputs, &outputs_mutex, i](Function* _unused, variable_list& inputs) -> bool {
-      if (inputs.size() != 1)
-        throw std::logic_error("placeholder callback received too many inputs");
-      std::lock_guard<std::mutex> lock(outputs_mutex);
-      outputs[i] = inputs[0];
-      return false; // Stop at output nodes
-    });
-  }
-  return callbacks;
 }
 
 }} // namespace torch::autograd

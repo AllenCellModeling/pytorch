@@ -25,27 +25,29 @@ class Dropout(InplaceFunction):
         ctx.train = train
         ctx.inplace = inplace
 
+        if ctx.p == 0 or not ctx.train:
+            return input
+
         if ctx.inplace:
             ctx.mark_dirty(input)
             output = input
         else:
             output = input.clone()
 
-        if ctx.p > 0 and ctx.train:
-            ctx.noise = cls._make_noise(input)
-            if ctx.p == 1:
-                ctx.noise.fill_(0)
-            else:
-                ctx.noise.bernoulli_(1 - ctx.p).div_(1 - ctx.p)
-            ctx.noise = ctx.noise.expand_as(input)
-            output.mul_(ctx.noise)
+        ctx.noise = cls._make_noise(input)
+        if ctx.p == 1:
+            ctx.noise.fill_(0)
+        else:
+            ctx.noise.bernoulli_(1 - ctx.p).div_(1 - ctx.p)
+        ctx.noise = ctx.noise.expand_as(input)
+        output.mul_(ctx.noise)
 
         return output
 
     @staticmethod
     def backward(ctx, grad_output):
         if ctx.p > 0 and ctx.train:
-            return grad_output.mul(Variable(ctx.noise)), None, None, None
+            return grad_output * ctx.noise, None, None, None
         else:
             return grad_output, None, None, None
 

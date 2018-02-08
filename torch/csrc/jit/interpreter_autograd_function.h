@@ -1,18 +1,20 @@
 #pragma once
 
+#include "torch/csrc/autograd/function.h"
+#include "torch/csrc/autograd/edge.h"
+#include "torch/csrc/autograd/functions/basic_ops.h"
+#include "torch/csrc/autograd/functions/utils.h"
+#include "torch/csrc/autograd/variable.h"
 #include "torch/csrc/jit/interpreter.h"
 #include "torch/csrc/jit/tracer_state.h"
-#include "torch/csrc/autograd/function.h"
-#include "torch/csrc/autograd/variable.h"
-#include "torch/csrc/autograd/functions/utils.h"
-#include "torch/csrc/autograd/functions/basic_ops.h"
 
 namespace torch { namespace jit {
 
 struct StageDetails {
-  std::vector<tracer::VariableFlags> input_flags;
-  std::vector<tracer::VariableFlags> output_flags;
+  std::vector<VariableFlags> input_flags;
+  std::vector<VariableFlags> output_flags;
   std::vector<int> copied_next_fns;
+  std::vector<bool> used_inputs;
 };
 
 struct InterpreterAutogradFunction : public autograd::Function {
@@ -20,7 +22,11 @@ struct InterpreterAutogradFunction : public autograd::Function {
                               const std::vector<StageDetails>& stage_details)
     : interp_(code)
     , stage_details_(stage_details)
-    , stage_(0) {}
+    , stage_(0) {
+      // stage 0 isn't run through the autograd, so we set this
+      // here just in case it is used
+      num_inputs = stage_details.at(0).input_flags.size();
+    }
 
   InterpreterAutogradFunction(InterpreterState interp,
                               const std::vector<StageDetails>& stage_details,
@@ -45,7 +51,7 @@ private:
 
 struct InterpreterFunctionFactory {
   explicit InterpreterFunctionFactory(tracer::TracingState *state);
-  std::shared_ptr<InterpreterAutogradFunction> construct();
+  std::shared_ptr<autograd::Function> construct();
 
 private:
   jit::Code code_;

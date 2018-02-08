@@ -14,6 +14,7 @@
 #include "THCP.h"
 
 #include "torch/csrc/utils/python_strings.h"
+#include "torch/csrc/cuda/python_comm.h"
 #include "ModuleSparse.cpp"
 
 THCState *state;
@@ -236,21 +237,21 @@ PyObject * THCPModule_manualSeedAll(PyObject *_unused, PyObject *seed)
 PyObject * THCPModule_seed(PyObject *_unused)
 {
   HANDLE_TH_ERRORS
-  return PyLong_FromUnsignedLong(THCRandom_seed(state));
+  return THPUtils_packUInt64(THCRandom_seed(state));
   END_HANDLE_TH_ERRORS
 }
 
 PyObject * THCPModule_seedAll(PyObject *_unused)
 {
   HANDLE_TH_ERRORS
-  return PyLong_FromUnsignedLong(THCRandom_seedAll(state));
+  return THPUtils_packUInt64(THCRandom_seedAll(state));
   END_HANDLE_TH_ERRORS
 }
 
 PyObject * THCPModule_initialSeed(PyObject *_unused)
 {
   HANDLE_TH_ERRORS
-  return PyLong_FromUnsignedLong(THCRandom_initialSeed(state));
+  return THPUtils_packUInt64(THCRandom_initialSeed(state));
   END_HANDLE_TH_ERRORS
 }
 
@@ -324,6 +325,46 @@ PyObject * THCPModule_emptyCache(PyObject *_unused)
   Py_RETURN_NONE;
 }
 
+PyObject * THCPModule_memoryAllocated(PyObject *_unused, PyObject *arg)
+{
+  HANDLE_TH_ERRORS
+  THPUtils_assert(THPUtils_checkLong(arg), "invalid argument to memory_allocated");
+  int device = (int) THPUtils_unpackLong(arg);
+  auto memory_allocated = THCCachingAllocator_currentMemoryAllocated(device);
+  return PyLong_FromUnsignedLongLong(memory_allocated);
+  END_HANDLE_TH_ERRORS
+}
+
+PyObject * THCPModule_maxMemoryAllocated(PyObject *_unused, PyObject *arg)
+{
+  HANDLE_TH_ERRORS
+  THPUtils_assert(THPUtils_checkLong(arg), "invalid argument to max_memory_allocated");
+  int device = (int) THPUtils_unpackLong(arg);
+  auto max_memory_allocated = THCCachingAllocator_maxMemoryAllocated(device);
+  return PyLong_FromUnsignedLongLong(max_memory_allocated);
+  END_HANDLE_TH_ERRORS
+}
+
+PyObject * THCPModule_memoryCached(PyObject *_unused, PyObject *arg)
+{
+  HANDLE_TH_ERRORS
+  THPUtils_assert(THPUtils_checkLong(arg), "invalid argument to memory_cached");
+  int device = (int) THPUtils_unpackLong(arg);
+  auto memory_cached = THCCachingAllocator_currentMemoryCached(device);
+  return PyLong_FromUnsignedLongLong(memory_cached);
+  END_HANDLE_TH_ERRORS
+}
+
+PyObject * THCPModule_maxMemoryCached(PyObject *_unused, PyObject *arg)
+{
+  HANDLE_TH_ERRORS
+  THPUtils_assert(THPUtils_checkLong(arg), "invalid argument to max_memory_cached");
+  int device = (int) THPUtils_unpackLong(arg);
+  auto max_memory_cached = THCCachingAllocator_maxMemoryCached(device);
+  return PyLong_FromUnsignedLongLong(max_memory_cached);
+  END_HANDLE_TH_ERRORS
+}
+
 ////////////////////////////////////////////////////////////////////////////////
 // Cuda module initialization
 ////////////////////////////////////////////////////////////////////////////////
@@ -372,7 +413,7 @@ PyObject * THCPModule_initExtension(PyObject *self)
 }
 
 #ifdef WITH_NCCL
-#include "nccl.h"
+#include "python_nccl.h"
 
 void THCPModule_useNccl()
 {
@@ -406,6 +447,10 @@ static struct PyMethodDef _THCPModule_methods[] = {
   {"_cuda_getRNGState", (PyCFunction)THCPModule_getRNGState,      METH_NOARGS,  NULL},
   {"_cuda_setRNGState", (PyCFunction)THCPModule_setRNGState,      METH_O,       NULL},
   {"_cuda_emptyCache", (PyCFunction) THCPModule_emptyCache,       METH_NOARGS,  NULL},
+  {"_cuda_memoryAllocated", (PyCFunction) THCPModule_memoryAllocated, METH_O,  NULL},
+  {"_cuda_maxMemoryAllocated", (PyCFunction) THCPModule_maxMemoryAllocated, METH_O,  NULL},
+  {"_cuda_memoryCached", (PyCFunction) THCPModule_memoryCached, METH_O,  NULL},
+  {"_cuda_maxMemoryCached", (PyCFunction) THCPModule_maxMemoryCached, METH_O,  NULL},
   {"_cuda_manualSeed",  (PyCFunction)THCPModule_manualSeed,       METH_O,       NULL},
   {"_cuda_manualSeedAll", (PyCFunction)THCPModule_manualSeedAll,  METH_O,       NULL},
   {"_cuda_seed",        (PyCFunction)THCPModule_seed,             METH_NOARGS,  NULL},
@@ -417,6 +462,9 @@ static struct PyMethodDef _THCPModule_methods[] = {
   {"_cuda_lock_mutex",   (PyCFunction)THCPModule_cudaLockMutex,   METH_NOARGS,  NULL},
   {"_cuda_unlock_mutex", (PyCFunction)THCPModule_cudaUnlockMutex, METH_NOARGS,  NULL},
 #ifdef WITH_NCCL
+  {"_nccl_version", (PyCFunction)THCPModule_nccl_version, METH_NOARGS, NULL},
+  {"_nccl_unique_id", (PyCFunction)THCPModule_nccl_unique_id, METH_NOARGS, NULL},
+  {"_nccl_init_rank", (PyCFunction)THCPModule_nccl_init_rank, METH_VARARGS, NULL},
   {"_nccl_reduce", (PyCFunction)THCPModule_nccl_reduce, METH_VARARGS, NULL},
   {"_nccl_all_reduce", (PyCFunction)THCPModule_nccl_all_reduce, METH_VARARGS, NULL},
   {"_nccl_broadcast", (PyCFunction)THCPModule_nccl_broadcast, METH_VARARGS, NULL},
@@ -429,3 +477,11 @@ static struct PyMethodDef _THCPModule_methods[] = {
 PyMethodDef* THCPModule_methods() {
   return _THCPModule_methods;
 }
+
+namespace torch { namespace cuda {
+
+void initModule(PyObject *module) {
+  python::initCommMethods(module);
+}
+
+}}

@@ -1,9 +1,3 @@
-IF(NOT MAGMA_FOUND)
-  FIND_PACKAGE(MAGMA)
-ENDIF()
-
-INCLUDE_DIRECTORIES()
-
 set(ATen_CUDA_INCLUDE ${ATen_CUDA_INCLUDE}
   ${TH_INCLUDE_PATH}/TH
   "${CMAKE_CURRENT_BINARY_DIR}"
@@ -11,7 +5,7 @@ PARENT_SCOPE)
 
 
 set(ATen_CUDA_SRCS ${ATen_CUDA_SRCS}
-  ${CMAKE_CURRENT_SOURCE_DIR}/THCSTensor.c
+  ${CMAKE_CURRENT_SOURCE_DIR}/THCSTensor.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/THCSTensor.cu
   ${CMAKE_CURRENT_SOURCE_DIR}/THCSparse.cu
   PARENT_SCOPE
@@ -34,7 +28,7 @@ INSTALL(FILES
           DESTINATION "${ATEN_INSTALL_INCLUDE_SUBDIR}/THCS")
 
 INSTALL(FILES
-          generic/THCSTensor.c
+          generic/THCSTensor.cpp
           generic/THCSTensor.cu
           generic/THCSTensor.h
           generic/THCSTensorMath.h

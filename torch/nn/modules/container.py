@@ -1,7 +1,8 @@
-from collections import OrderedDict
-import string
-import torch
 import warnings
+from collections import OrderedDict, Iterable
+from itertools import islice
+
+import torch
 from .module import Module
 
 
@@ -21,7 +22,7 @@ class Sequential(Module):
     Modules will be added to it in the order they are passed in the constructor.
     Alternatively, an ordered dict of modules can also be passed in.
 
-    To make it easier to understand, given is a small example::
+    To make it easier to understand, here is a small example::
 
         # Example of using Sequential
         model = nn.Sequential(
@@ -49,15 +50,23 @@ class Sequential(Module):
             for idx, module in enumerate(args):
                 self.add_module(str(idx), module)
 
-    def __getitem__(self, idx):
-        if not (-len(self) <= idx < len(self)):
+    def _get_item_by_idx(self, iterator, idx):
+        """Get the idx-th item of the iterator"""
+        size = len(self)
+        if not -size <= idx < size:
             raise IndexError('index {} is out of range'.format(idx))
-        if idx < 0:
-            idx += len(self)
-        it = iter(self._modules.values())
-        for i in range(idx):
-            next(it)
-        return next(it)
+        idx %= size
+        return next(islice(iterator, idx, None))
+
+    def __getitem__(self, idx):
+        if isinstance(idx, slice):
+            return Sequential(OrderedDict(list(self._modules.items())[idx]))
+        else:
+            return self._get_item_by_idx(self._modules.values(), idx)
+
+    def __setitem__(self, idx, module):
+        key = self._get_item_by_idx(self._modules.keys(), idx)
+        return setattr(self, key, module)
 
     def __len__(self):
         return len(self._modules)
@@ -80,7 +89,7 @@ class ModuleList(Module):
     contains are properly registered, and will be visible by all Module methods.
 
     Arguments:
-        modules (list, optional): a list of modules to add
+        modules (iterable, optional): an iterable of modules to add
 
     Example::
 
@@ -102,11 +111,14 @@ class ModuleList(Module):
             self += modules
 
     def __getitem__(self, idx):
-        if not (-len(self) <= idx < len(self)):
-            raise IndexError('index {} is out of range'.format(idx))
-        if idx < 0:
-            idx += len(self)
-        return self._modules[str(idx)]
+        if isinstance(idx, slice):
+            return ModuleList(list(self._modules.values())[idx])
+        else:
+            if not (-len(self) <= idx < len(self)):
+                raise IndexError('index {} is out of range'.format(idx))
+            if idx < 0:
+                idx += len(self)
+            return self._modules[str(idx)]
 
     def __setitem__(self, idx, module):
         return setattr(self, str(idx), module)
@@ -126,7 +138,7 @@ class ModuleList(Module):
         return keys
 
     def append(self, module):
-        r"""Appends a given module at the end of the list.
+        r"""Appends a given module to the end of the list.
 
         Arguments:
             module (nn.Module): module to append
@@ -135,14 +147,14 @@ class ModuleList(Module):
         return self
 
     def extend(self, modules):
-        r"""Appends modules from a Python list at the end.
+        r"""Appends modules from a Python iterable to the end of the list.
 
         Arguments:
-            modules (list): list of modules to append
+            modules (iterable): iterable of modules to append
         """
-        if not isinstance(modules, list):
-            raise TypeError("ModuleList.extend should be called with a "
-                            "list, but got " + type(modules).__name__)
+        if not isinstance(modules, Iterable):
+            raise TypeError("ModuleList.extend should be called with an "
+                            "iterable, but got " + type(modules).__name__)
         offset = len(self)
         for i, module in enumerate(modules):
             self.add_module(str(offset + i), module)
@@ -156,7 +168,7 @@ class ParameterList(Module):
     contains are properly registered, and will be visible by all Module methods.
 
     Arguments:
-        modules (list, optional): a list of :class:`~torch.nn.Parameter`` to add
+        parameters (iterable, optional): an iterable of :class:`~torch.nn.Parameter`` to add
 
     Example::
 
@@ -166,7 +178,7 @@ class ParameterList(Module):
                 self.params = nn.ParameterList([nn.Parameter(torch.randn(10, 10)) for i in range(10)])
 
             def forward(self, x):
-                # ModuleList can act as an iterable, or be indexed using ints
+                # ParameterList can act as an iterable, or be indexed using ints
                 for i, p in enumerate(self.params):
                     x = self.params[i // 2].mm(x) + p.mm(x)
                 return x
@@ -178,11 +190,14 @@ class ParameterList(Module):
             self += parameters
 
     def __getitem__(self, idx):
-        if not (-len(self) <= idx < len(self)):
-            raise IndexError('index {} is out of range'.format(idx))
-        if idx < 0:
-            idx += len(self)
-        return self._parameters[str(idx)]
+        if isinstance(idx, slice):
+            return ParameterList(list(self._parameters.values())[idx])
+        else:
+            if not (-len(self) <= idx < len(self)):
+                raise IndexError('index {} is out of range'.format(idx))
+            if idx < 0:
+                idx += len(self)
+            return self._parameters[str(idx)]
 
     def __setitem__(self, idx, param):
         return self.register_parameter(str(idx), param)
@@ -211,15 +226,26 @@ class ParameterList(Module):
         return self
 
     def extend(self, parameters):
-        """Appends parameters from a Python list at the end.
+        """Appends parameters from a Python iterable to the end of the list.
 
         Arguments:
-            parameters (list): list of parameters to append
+            parameters (iterable): iterable of parameters to append
         """
-        if not isinstance(parameters, list):
-            raise TypeError("ParameterList.extend should be called with a "
-                            "list, but got " + type(parameters).__name__)
+        if not isinstance(parameters, Iterable):
+            raise TypeError("ParameterList.extend should be called with an "
+                            "iterable, but got " + type(parameters).__name__)
         offset = len(self)
         for i, param in enumerate(parameters):
             self.register_parameter(str(offset + i), param)
         return self
+
+    def __repr__(self):
+        tmpstr = self.__class__.__name__ + '(\n'
+        for k, p in self._parameters.items():
+            size_str = 'x'.join(str(size) for size in p.size())
+            device_str = '' if not p.is_cuda else ' (GPU {})'.format(p.get_device())
+            parastr = 'Parameter containing: [{} of size {}{}]'.format(
+                torch.typename(p.data), size_str, device_str)
+            tmpstr = tmpstr + '  (' + k + '): ' + parastr + '\n'
+        tmpstr = tmpstr + ')'
+        return tmpstr

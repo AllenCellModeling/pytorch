@@ -29,10 +29,35 @@ static inline void barf(const char *fmt, ...) {
     barf("%s:%u: %s: Assertion `%s` failed: " msg , __FILE__, __LINE__, __func__, #cond,##__VA_ARGS__); \
   }
 
-#define ASSERT_THROWS(fn, message)                                  \
-try {                                                               \
-  fn;                                                               \
-  ASSERT(false);                                                    \
-} catch(std::runtime_error &e) {                                    \
-  ASSERT(std::string(e.what()).find(message) != std::string::npos); \
-}
+#define TRY_CATCH_ELSE(fn, catc, els)                           \
+  {                                                             \
+    /* avoid mistakenly passing if els code throws exception*/  \
+    bool _passed = false;                                       \
+    try {                                                       \
+      fn;                                                       \
+      _passed = true;                                           \
+      els;                                                      \
+    } catch (std::runtime_error &e) {                           \
+      ASSERT(!_passed);                                         \
+      catc;                                                     \
+    }                                                           \
+  }
+
+#define ASSERT_THROWSM(fn, message)     \
+  TRY_CATCH_ELSE(fn, ASSERT(std::string(e.what()).find(message) != std::string::npos), ASSERT(false))
+
+#define ASSERT_THROWS(fn)  \
+  ASSERT_THROWSM(fn, "");
+
+#define ASSERT_EQUAL(t1, t2) \
+  ASSERT(t1.equal(t2));
+
+// allclose broadcasts, so check same size before allclose.
+#define ASSERT_ALLCLOSE(t1, t2)   \
+  ASSERT(t1.is_same_size(t2));    \
+  ASSERT(t1.allclose(t2));
+
+// allclose broadcasts, so check same size before allclose.
+#define ASSERT_ALLCLOSE_TOLERANCES(t1, t2, atol, rtol)   \
+  ASSERT(t1.is_same_size(t2));    \
+  ASSERT(t1.allclose(t2, atol, rtol));

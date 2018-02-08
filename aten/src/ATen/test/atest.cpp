@@ -31,14 +31,10 @@ int main() {
   foo = foo+foo*3;
   foo -= 4;
 
-  bool threw = false;
-  try {
+  {
     Tensor no;
-    add_out(no,foo,foo);
-  } catch (std::runtime_error&) {
-    threw = true;
+    ASSERT_THROWS(add_out(no,foo,foo));
   }
-  check(threw);
   Scalar a = 4;
 
   float b = a.to<float>();
@@ -70,15 +66,9 @@ int main() {
 
   cout << f << endl;
   cout << f.strides() << " " << f.sizes() << endl;
-  threw = false;
-  try {
-    f.resize_({3,4,5});
-  } catch(std::runtime_error&) {
-    threw = true;
-  }
-  check(threw);
+  ASSERT_THROWS(f.resize_({3,4,5}));
   {
-    bool isgone = 0;
+    int isgone = 0;
     {
       auto f2 = CPU(kFloat).tensorFromBlob(data, {1,2,3}, [&](void*) {
         isgone++;
@@ -88,7 +78,7 @@ int main() {
     check(isgone == 1);
   }
   {
-    bool isgone = 0;
+    int isgone = 0;
     Tensor a_view;
     {
       auto f2 = CPU(kFloat).tensorFromBlob(data, {1,2,3}, [&](void*) {
@@ -102,7 +92,7 @@ int main() {
   }
 
   if(at::hasCUDA()) {
-    bool isgone = 0;
+    int isgone = 0;
     {
       auto f2 = CUDA(kFloat).tensorFromBlob(nullptr, {1,2,3}, [&](void*) {
         isgone++;

@@ -1,6 +1,7 @@
 from common import TestCase, run_tests
+import unittest
 import torch
-from torch.autograd import Variable
+from torch.autograd import Variable, variable
 
 
 class TestIndexing(TestCase):
@@ -40,6 +41,9 @@ class TestIndexing(TestCase):
         self.assertEqual(v[mask].shape, (3, 7, 3))
         self.assertEqual(v[mask], torch.stack([v[0], v[2], v[3]]))
 
+        v = Variable(torch.Tensor([1]))
+        self.assertEqual(v[v == 0], Variable(torch.Tensor()))
+
     def test_multiple_byte_mask(self):
         v = Variable(torch.randn(5, 7, 3))
         # note: these broadcast together and are transposed to the first dim
@@ -75,6 +79,123 @@ class TestIndexing(TestCase):
         result = x[rows[:, None], columns]
         self.assertEqual(result.data.tolist(), [[0, 2], [9, 11]])
 
+    def test_empty_index(self):
+        x = Variable(torch.arange(0, 12).view(4, 3))
+        idx = Variable(torch.LongTensor())
+        self.assertEqual(x[idx].numel(), 0)
+
+        # empty assignment should have no effect but not throw an exception
+        y = x.clone()
+        y[idx] = -1
+        self.assertEqual(x, y)
+
+        mask = torch.zeros(4, 3).byte()
+        y[mask] = -1
+        self.assertEqual(x, y)
+
+    def test_index_getitem_copy_bools_slices(self):
+        true = variable(1).byte()
+        false = variable(0).byte()
+
+        tensors = [Variable(torch.randn(2, 3))]
+        if torch._C._with_scalars():
+            tensors.append(variable(3))
+
+        for a in tensors:
+            self.assertNotEqual(a.data_ptr(), a[True].data_ptr())
+            self.assertEqual(variable([]), a[False])
+            if torch._C._with_scalars():
+                self.assertNotEqual(a.data_ptr(), a[true].data_ptr())
+                self.assertEqual(variable([]), a[false])
+            self.assertEqual(a.data_ptr(), a[None].data_ptr())
+            self.assertEqual(a.data_ptr(), a[...].data_ptr())
+
+    def test_index_setitem_bools_slices(self):
+        true = variable(1).byte()
+        false = variable(0).byte()
+
+        tensors = [Variable(torch.randn(2, 3))]
+        if torch._C._with_scalars():
+            tensors.append(variable(3))
+
+        for a in tensors:
+            a_clone = a.clone()
+            # prefix with a 1,1, to ensure we are compatible with numpy which cuts off prefix 1s
+            # (some of these ops already prefix a 1 to the size)
+            neg_ones = torch.ones_like(a) * -1
+            neg_ones_expanded = neg_ones.unsqueeze(0).unsqueeze(0)
+            a[True] = neg_ones_expanded
+            self.assertEqual(a, neg_ones)
+            a[False] = 5
+            self.assertEqual(a, neg_ones)
+            if torch._C._with_scalars():
+                a[true] = neg_ones_expanded * 2
+                self.assertEqual(a, neg_ones * 2)
+                a[false] = 5
+                self.assertEqual(a, neg_ones * 2)
+            a[None] = neg_ones_expanded * 3
+            self.assertEqual(a, neg_ones * 3)
+            a[...] = neg_ones_expanded * 4
+            self.assertEqual(a, neg_ones * 4)
+            if a.dim() == 0:
+                with self.assertRaises(RuntimeError):
+                    a[:] = neg_ones_expanded * 5
+
+    def test_setitem_expansion_error(self):
+        true = variable(1).byte()
+        a = Variable(torch.randn(2, 3))
+        # check prefix with  non-1s doesn't work
+        a_expanded = a.expand(torch.Size([5, 1]) + a.size())
+        with self.assertRaises(RuntimeError):
+            a[True] = a_expanded
+        with self.assertRaises(RuntimeError):
+            a[true] = torch.autograd.Variable(a_expanded)
+
+    @unittest.skipIf(not torch._C._with_scalars(), "scalars not enabled")
+    def test_getitem_scalars(self):
+        zero = variable(0).long()
+        one = variable(1).long()
+
+        # non-scalar indexed with scalars
+        a = Variable(torch.randn(2, 3))
+        self.assertEqual(a[0], a[zero])
+        self.assertEqual(a[0][1], a[zero][one])
+        self.assertEqual(a[0, 1], a[zero, one])
+        self.assertEqual(a[0, one], a[zero, 1])
+
+        # scalar indexed with scalar
+        r = variable(0).normal_()
+        with self.assertRaises(RuntimeError):
+            r[:]
+        with self.assertRaises(RuntimeError):
+            r[zero]
+        self.assertEqual(r, r[...])
+
+    @unittest.skipIf(not torch._C._with_scalars(), "scalars not enabled")
+    def test_setitem_scalars(self):
+        zero = variable(0).long()
+
+        # non-scalar indexed with scalars
+        a = Variable(torch.randn(2, 3))
+        a_set_with_number = a.clone()
+        a_set_with_scalar = a.clone()
+        b = Variable(torch.randn(3))
+
+        a_set_with_number[0] = b
+        a_set_with_scalar[zero] = b
+        self.assertEqual(a_set_with_number, a_set_with_scalar)
+        a[1, zero] = 7.7
+        self.assertEqual(7.7, a[1, 0])
+
+        # scalar indexed with scalars
+        r = variable(0).normal_()
+        with self.assertRaises(RuntimeError):
+            r[:] = 8.8
+        with self.assertRaises(RuntimeError):
+            r[zero] = 8.8
+        r[...] = 9.9
+        self.assertEqual(9.9, r)
+
     def test_basic_advanced_combined(self):
         # From the NumPy indexing example
         x = Variable(torch.arange(0, 12).view(4, 3))
@@ -109,6 +230,16 @@ class TestIndexing(TestCase):
         self.assertEqual(x[1].data, torch.arange(4, 8))
         self.assertEqual(x[2], value)
         self.assertEqual(x[3].data, torch.arange(12, 16))
+
+    def test_variable_slicing(self):
+        x = Variable(torch.arange(0, 16).view(4, 4))
+        indices = Variable(torch.IntTensor([0, 1]))
+        i, j = indices
+        self.assertEqual(x[i:j], x[0:1])
+
+    def test_invalid_index(self):
+        x = Variable(torch.arange(0, 16).view(4, 4))
+        self.assertRaisesRegex(TypeError, 'slice indices', lambda: x["0":"1"])
 
 
 def tensor(*args, **kwargs):
@@ -200,7 +331,6 @@ class NumpyTests(TestCase):
         self.assertEqual(a[()], a)
         self.assertEqual(a[()].data_ptr(), a.data_ptr())
 
-    # @unittest.skip('failing')
     def test_empty_fancy_index(self):
         # Empty list index creates an empty array
         a = tensor([1, 2, 3])

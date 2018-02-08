@@ -378,6 +378,12 @@ Normalization layers
 .. autoclass:: InstanceNorm3d
     :members:
 
+:hidden:`LocalResponseNorm`
+~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. autoclass:: LocalResponseNorm
+    :members:
+
 Recurrent layers
 ----------------------------------
 
@@ -522,12 +528,6 @@ Loss functions
 ~~~~~~~~~~~~~~~~~~~~~~~~
 
 .. autoclass:: PoissonNLLLoss
-    :members:
-
-:hidden:`NLLLoss2d`
-~~~~~~~~~~~~~~~~~~~
-
-.. autoclass:: NLLLoss2d
     :members:
 
 :hidden:`KLDivLoss`
@@ -684,6 +684,18 @@ Utilities
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 .. autofunction:: torch.nn.utils.rnn.pad_packed_sequence
+
+
+:hidden:`pad_sequence`
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. autofunction:: torch.nn.utils.rnn.pad_sequence
+
+
+:hidden:`pack_sequence`
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. autofunction:: torch.nn.utils.rnn.pack_sequence
 
 
 torch.nn.functional
@@ -930,6 +942,11 @@ Normalization functions
 ~~~~~~~~~~~~~~~~~~~~
 
 .. autofunction:: batch_norm
+
+:hidden:`local_response_norm`
+~~~~~~~~~~~~~~~~~~~~
+
+.. autofunction:: local_response_norm
 
 :hidden:`normalize`
 ~~~~~~~~~~~~~~~~~~~~

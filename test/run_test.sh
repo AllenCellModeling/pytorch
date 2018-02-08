@@ -25,7 +25,6 @@ $PYCMD test_torch.py $@
 
 echo "Running autograd tests"
 $PYCMD test_autograd.py $@
-$PYCMD test_potrf.py $@
 
 echo "Running torch.distributions tests"
 $PYCMD test_distributions.py $@
@@ -47,8 +46,11 @@ $PYCMD test_jit.py $@
 
 echo "Running multiprocessing tests"
 $PYCMD test_multiprocessing.py $@
-MULTIPROCESSING_METHOD=spawn $PYCMD test_multiprocessing.py $@
-MULTIPROCESSING_METHOD=forkserver $PYCMD test_multiprocessing.py $@
+# Turn off unsupported methods for Windows
+if [[ "$OSTYPE" != "msys" ]]; then
+  MULTIPROCESSING_METHOD=spawn $PYCMD test_multiprocessing.py $@
+  MULTIPROCESSING_METHOD=forkserver $PYCMD test_multiprocessing.py $@
+fi
 
 echo "Running util tests"
 $PYCMD test_utils.py $@
@@ -62,51 +64,80 @@ $PYCMD test_cuda.py $@
 echo "Running NCCL tests"
 $PYCMD test_nccl.py $@
 
-distributed_set_up() {
-  export TEMP_DIR="$(mktemp -d)"
-  rm -rf "$TEMP_DIR/"*
-  mkdir "$TEMP_DIR/barrier"
-  mkdir "$TEMP_DIR/test_dir"
-}
+# Skipping C++ extensions tests for Windows because setup.py does not link
+# the required libraries. Windows users should create their own cmake file with
+# proper linker flags.
+if [[ "$OSTYPE" != "msys" ]]; then
+  echo "Running C++ Extensions tests"
+  cd cpp_extensions
+  $PYCMD setup.py install --root ./install
+  cd ..
+  PYTHONPATH="$PWD/$(find cpp_extensions/install -name '*-packages'):$PYTHONPATH" \
+    $PYCMD test_cpp_extensions.py $@
+  echo "Removing cpp_extensions/install"
+  rm -rf cpp_extensions/install
+fi
 
-distributed_tear_down() {
-  rm -rf "$TEMP_DIR"
-}
+# Skipping test_distributed for Windows because it doesn't have fcntl
+if [[ "$OSTYPE" != "msys" ]]; then
+    distributed_set_up() {
+      export TEMP_DIR="$(mktemp -d)"
+      rm -rf "$TEMP_DIR/"*
+      mkdir "$TEMP_DIR/barrier"
+      mkdir "$TEMP_DIR/test_dir"
+    }
 
-trap distributed_tear_down EXIT SIGHUP SIGINT SIGTERM
+    distributed_tear_down() {
+      rm -rf "$TEMP_DIR"
+    }
 
-echo "Running distributed tests for the TCP backend"
-distributed_set_up
-BACKEND=tcp WORLD_SIZE=3 $PYCMD ./test_distributed.py
-distributed_tear_down
+    trap distributed_tear_down EXIT SIGHUP SIGINT SIGTERM
 
-echo "Running distributed tests for the TCP backend with file init_method"
-distributed_set_up
-BACKEND=tcp WORLD_SIZE=3 INIT_METHOD='file://'$TEMP_DIR'/shared_init_file' $PYCMD ./test_distributed.py
-distributed_tear_down
+    echo "Running distributed tests for the TCP backend"
+    distributed_set_up
+    BACKEND=tcp WORLD_SIZE=3 $PYCMD ./test_distributed.py
+    distributed_tear_down
 
-echo "Running distributed tests for the Gloo backend"
-distributed_set_up
-BACKEND=gloo WORLD_SIZE=3 $PYCMD ./test_distributed.py
-distributed_tear_down
+    echo "Running distributed tests for the TCP backend with file init_method"
+    distributed_set_up
+    BACKEND=tcp WORLD_SIZE=3 INIT_METHOD='file://'$TEMP_DIR'/shared_init_file' $PYCMD ./test_distributed.py
+    distributed_tear_down
 
-echo "Running distributed tests for the Gloo backend with file init_method"
-distributed_set_up
-BACKEND=gloo WORLD_SIZE=3 INIT_METHOD='file://'$TEMP_DIR'/shared_init_file' $PYCMD ./test_distributed.py
-distributed_tear_down
+    echo "Running distributed tests for the Gloo backend"
+    distributed_set_up
+    BACKEND=gloo WORLD_SIZE=3 $PYCMD ./test_distributed.py
+    distributed_tear_down
 
-if [ -x "$(command -v mpiexec)" ]; then
-  echo "Running distributed tests for the MPI backend"
-  distributed_set_up
-  BACKEND=mpi mpiexec -n 3 --noprefix $PYCMD ./test_distributed.py
-  distributed_tear_down
+    echo "Running distributed tests for the Gloo backend with file init_method"
+    distributed_set_up
+    BACKEND=gloo WORLD_SIZE=3 INIT_METHOD='file://'$TEMP_DIR'/shared_init_file' $PYCMD ./test_distributed.py
+    distributed_tear_down
 
-  echo "Running distributed tests for the MPI backend with file init_method"
-  distributed_set_up
-  BACKEND=mpi INIT_METHOD='file://'$TEMP_DIR'/shared_init_file' mpiexec -n 3 --noprefix $PYCMD ./test_distributed.py
-  distributed_tear_down
-else
-  echo "Skipping MPI backend tests (MPI not found)"
+    if [ -x "$(command -v mpiexec)" ]; then
+      echo "Running distributed tests for the MPI backend"
+      distributed_set_up
+      BACKEND=mpi mpiexec -n 3 --noprefix $PYCMD ./test_distributed.py
+      distributed_tear_down
+
+      echo "Running distributed tests for the MPI backend with file init_method"
+      distributed_set_up
+      BACKEND=mpi INIT_METHOD='file://'$TEMP_DIR'/shared_init_file' mpiexec -n 3 --noprefix $PYCMD ./test_distributed.py
+      distributed_tear_down
+    else
+      echo "Skipping MPI backend tests (MPI not found)"
+    fi
+
+    echo "Running distributed tests for the Nccl backend"
+    distributed_set_up
+    BACKEND=nccl WORLD_SIZE=2 $PYCMD ./test_distributed.py
+    distributed_tear_down
+
+    echo "Running distributed tests for the Nccl backend with file init_method"
+    distributed_set_up
+    BACKEND=nccl WORLD_SIZE=2 INIT_METHOD='file://'$TEMP_DIR'/shared_init_file' $PYCMD ./test_distributed.py
+    distributed_tear_down
+
+
 fi
 
 if [[ $COVERAGE -eq 1 ]]; then

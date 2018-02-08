@@ -1,8 +1,11 @@
 #include "python_arg_flatten.h"
 
+#include "torch/csrc/autograd/grad_mode.h"
+
 namespace torch { namespace jit { namespace python {
 
 using namespace torch::autograd;
+using namespace at;
 
 // Alphabet used to describe structure of inputs/outputs (D for desc)
 namespace D {
@@ -41,7 +44,6 @@ void flatten_rec(PyObject* obj, ParsedArgs& args) {
     args.vars.push_back(var);
     args.desc.metadata.emplace_back(var);
     args.desc.structure.push_back(D::Variable);
-    args.is_volatile |= var.is_volatile();
   } else {
     std::string msg = "Only tuples, lists and Variables supported as JIT inputs, but got ";
     msg += THPUtils_typename(obj);
@@ -53,6 +55,7 @@ void flatten_rec(PyObject* obj, ParsedArgs& args) {
 
 ParsedArgs flatten(py::handle obj) {
   ParsedArgs args;
+  args.desc.grad_enabled = autograd::GradMode::is_enabled();
   flatten_rec(obj.ptr(), args);
   return args;
 }
@@ -68,8 +71,8 @@ py::object cast_sequence(std::vector<py::object> objs) {
   return sequence;
 }
 
-py::object unflatten_rec(variable_list::iterator& var_it,
-                         variable_list::iterator& var_it_end,
+py::object unflatten_rec(ArrayRef<Variable>::iterator& var_it,
+                         ArrayRef<Variable>::iterator& var_it_end,
                          std::string::const_iterator& desc_it) {
   char type = *desc_it++;
   if (type == D::TupleOpen) {
@@ -88,13 +91,13 @@ py::object unflatten_rec(variable_list::iterator& var_it,
     if (var_it == var_it_end)
       throw std::runtime_error("Not enough Variables given to unflatten");
     auto var = *var_it++;
-    return py::reinterpret_borrow<py::object>(THPVariable_Wrap(var));
+    return py::reinterpret_steal<py::object>(THPVariable_Wrap(var));
   }
 }
 
 } // anonymous namespace
 
-PyObject* unflatten(variable_list&& vars, const IODescriptor& desc) {
+PyObject* unflatten(ArrayRef<Variable> vars, const IODescriptor& desc) {
   // NB: We don't do correctness checking on descriptor.
   // It has to be a correct bytes object produced by unflatten.
   auto vars_it = vars.begin();

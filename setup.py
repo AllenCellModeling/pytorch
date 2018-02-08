@@ -11,16 +11,22 @@ import subprocess
 import shutil
 import sys
 import os
+import json
+import glob
 
 from tools.setup_helpers.env import check_env_flag
 from tools.setup_helpers.cuda import WITH_CUDA, CUDA_HOME, CUDA_VERSION
-from tools.setup_helpers.cudnn import WITH_CUDNN, CUDNN_LIB_DIR, CUDNN_INCLUDE_DIR
+from tools.setup_helpers.cudnn import (WITH_CUDNN, CUDNN_LIBRARY,
+                                       CUDNN_LIB_DIR, CUDNN_INCLUDE_DIR)
 from tools.setup_helpers.nccl import WITH_NCCL, WITH_SYSTEM_NCCL, NCCL_LIB_DIR, \
     NCCL_INCLUDE_DIR, NCCL_ROOT_DIR, NCCL_SYSTEM_LIB
-from tools.setup_helpers.nnpack import WITH_NNPACK, NNPACK_LIB_PATHS, \
-    NNPACK_INCLUDE_DIRS
+from tools.setup_helpers.nnpack import WITH_NNPACK
 from tools.setup_helpers.nvtoolext import NVTOOLEXT_HOME
 from tools.setup_helpers.split_types import split_types
+from tools.setup_helpers.generate_code import generate_code
+from tools.setup_helpers.ninja_builder import NinjaBuilder, ninja_build_ext
+from tools.setup_helpers.dist_check import WITH_DISTRIBUTED, \
+    WITH_DISTRIBUTED_MW, WITH_GLOO_IBVERBS
 
 DEBUG = check_env_flag('DEBUG')
 
@@ -28,9 +34,55 @@ IS_WINDOWS = (platform.system() == 'Windows')
 IS_DARWIN = (platform.system() == 'Darwin')
 IS_LINUX = (platform.system() == 'Linux')
 
-WITH_DISTRIBUTED = not check_env_flag('NO_DISTRIBUTED') and not IS_WINDOWS
-WITH_DISTRIBUTED_MW = WITH_DISTRIBUTED and check_env_flag('WITH_DISTRIBUTED_MW')
 
+WITH_SCALARS = check_env_flag('WITH_SCALARS')
+
+try:
+    import ninja
+    WITH_NINJA = True
+except ImportError:
+    WITH_NINJA = False
+
+if not WITH_NINJA:
+    ################################################################################
+    # Monkey-patch setuptools to compile in parallel
+    ################################################################################
+
+    def parallelCCompile(self, sources, output_dir=None, macros=None,
+                         include_dirs=None, debug=0, extra_preargs=None,
+                         extra_postargs=None, depends=None):
+        # those lines are copied from distutils.ccompiler.CCompiler directly
+        macros, objects, extra_postargs, pp_opts, build = self._setup_compile(
+            output_dir, macros, include_dirs, sources, depends, extra_postargs)
+        cc_args = self._get_cc_args(pp_opts, debug, extra_preargs)
+
+        # compile using a thread pool
+        import multiprocessing.pool
+
+        def _single_compile(obj):
+            src, ext = build[obj]
+            self._compile(obj, src, ext, cc_args, extra_postargs, pp_opts)
+        num_jobs = multiprocessing.cpu_count()
+        max_jobs = os.getenv("MAX_JOBS")
+        if max_jobs is not None:
+            num_jobs = min(num_jobs, int(max_jobs))
+        multiprocessing.pool.ThreadPool(num_jobs).map(_single_compile, objects)
+
+        return objects
+    distutils.ccompiler.CCompiler.compile = parallelCCompile
+
+original_link = distutils.unixccompiler.UnixCCompiler.link
+
+
+def patched_link(self, *args, **kwargs):
+    _cxx = self.compiler_cxx
+    self.compiler_cxx = None
+    result = original_link(self, *args, **kwargs)
+    self.compiler_cxx = _cxx
+    return result
+
+
+distutils.unixccompiler.UnixCCompiler.link = patched_link
 
 ################################################################################
 # Workaround setuptools -Wstrict-prototypes warnings
@@ -43,46 +95,6 @@ for key, value in cfg_vars.items():
         cfg_vars[key] = value.replace("-Wstrict-prototypes", "")
 
 ################################################################################
-# Monkey-patch setuptools to compile in parallel
-################################################################################
-original_link = distutils.unixccompiler.UnixCCompiler.link
-
-
-def parallelCCompile(self, sources, output_dir=None, macros=None,
-                     include_dirs=None, debug=0, extra_preargs=None,
-                     extra_postargs=None, depends=None):
-    # those lines are copied from distutils.ccompiler.CCompiler directly
-    macros, objects, extra_postargs, pp_opts, build = self._setup_compile(
-        output_dir, macros, include_dirs, sources, depends, extra_postargs)
-    cc_args = self._get_cc_args(pp_opts, debug, extra_preargs)
-
-    # compile using a thread pool
-    import multiprocessing.pool
-
-    def _single_compile(obj):
-        src, ext = build[obj]
-        self._compile(obj, src, ext, cc_args, extra_postargs, pp_opts)
-    num_jobs = multiprocessing.cpu_count()
-    max_jobs = os.getenv("MAX_JOBS")
-    if max_jobs is not None:
-        num_jobs = min(num_jobs, int(max_jobs))
-    multiprocessing.pool.ThreadPool(num_jobs).map(_single_compile, objects)
-
-    return objects
-
-
-def patched_link(self, *args, **kwargs):
-    _cxx = self.compiler_cxx
-    self.compiler_cxx = None
-    result = original_link(self, *args, **kwargs)
-    self.compiler_cxx = _cxx
-    return result
-
-
-distutils.ccompiler.CCompiler.compile = parallelCCompile
-distutils.unixccompiler.UnixCCompiler.link = patched_link
-
-################################################################################
 # Custom build commands
 ################################################################################
 
@@ -90,6 +102,12 @@ dep_libs = [
     'nccl', 'ATen',
     'libshm', 'libshm_windows', 'gloo', 'THD', 'nanopb',
 ]
+
+
+# global ninja file for building generated code stuff
+ninja_global = None
+if WITH_NINJA:
+    ninja_global = NinjaBuilder('global')
 
 
 def build_libs(libs):
@@ -101,14 +119,27 @@ def build_libs(libs):
         build_libs_cmd = ['bash', 'torch/lib/build_libs.sh']
     my_env = os.environ.copy()
     my_env["PYTORCH_PYTHON"] = sys.executable
+    if not IS_WINDOWS:
+        if WITH_NINJA:
+            my_env["CMAKE_GENERATOR"] = '-GNinja'
+            my_env["CMAKE_INSTALL"] = 'ninja install'
+        else:
+            my_env['CMAKE_GENERATOR'] = ''
+            my_env['CMAKE_INSTALL'] = 'make install'
     if WITH_SYSTEM_NCCL:
         my_env["NCCL_ROOT_DIR"] = NCCL_ROOT_DIR
     if WITH_CUDA:
         my_env["CUDA_BIN_PATH"] = CUDA_HOME
         build_libs_cmd += ['--with-cuda']
+    if WITH_NNPACK:
+        build_libs_cmd += ['--with-nnpack']
     if WITH_CUDNN:
         my_env["CUDNN_LIB_DIR"] = CUDNN_LIB_DIR
+        my_env["CUDNN_LIBRARY"] = CUDNN_LIBRARY
         my_env["CUDNN_INCLUDE_DIR"] = CUDNN_INCLUDE_DIR
+
+    if WITH_GLOO_IBVERBS:
+        build_libs_cmd += ['--with-gloo-ibverbs']
 
     if subprocess.call(build_libs_cmd + libs, env=my_env) != 0:
         sys.exit(1)
@@ -128,6 +159,16 @@ class build_deps(Command):
         pass
 
     def run(self):
+        # Check if you remembered to check out submodules
+        def check_file(f):
+            if not os.path.exists(f):
+                print("Could not find {}".format(f))
+                print("Did you run 'git submodule update --init'?")
+                sys.exit(1)
+        check_file(os.path.join(lib_path, "gloo", "CMakeLists.txt"))
+        check_file(os.path.join(lib_path, "nanopb", "CMakeLists.txt"))
+        check_file(os.path.join(lib_path, "pybind11", "CMakeLists.txt"))
+
         libs = []
         if WITH_NCCL and not WITH_SYSTEM_NCCL:
             libs += ['nccl']
@@ -195,6 +236,23 @@ class develop(setuptools.command.develop.develop):
     def run(self):
         build_py.create_version_file()
         setuptools.command.develop.develop.run(self)
+        self.create_compile_commands()
+
+    def create_compile_commands(self):
+        def load(filename):
+            with open(filename) as f:
+                return json.load(f)
+        ninja_files = glob.glob('build/*_compile_commands.json')
+        cmake_files = glob.glob('torch/lib/build/*/compile_commands.json')
+        all_commands = [entry
+                        for f in ninja_files + cmake_files
+                        for entry in load(f)]
+        with open('compile_commands.json', 'w') as f:
+            json.dump(all_commands, f, indent=2)
+        if not WITH_NINJA:
+            print("WARNING: 'develop' is not building C++ code incrementally")
+            print("because ninja is not installed. Run this to enable it:")
+            print(" > pip install ninja")
 
 
 def monkey_patch_THD_link_flags():
@@ -214,7 +272,11 @@ def monkey_patch_THD_link_flags():
     C.extra_link_args += thd_deps
 
 
-class build_ext(setuptools.command.build_ext.build_ext):
+build_ext_parent = ninja_build_ext if WITH_NINJA \
+    else setuptools.command.build_ext.build_ext
+
+
+class build_ext(build_ext_parent):
 
     def run(self):
 
@@ -224,7 +286,7 @@ class build_ext(setuptools.command.build_ext.build_ext):
         else:
             print('-- NumPy not found')
         if WITH_CUDNN:
-            print('-- Detected cuDNN at ' + CUDNN_LIB_DIR + ', ' + CUDNN_INCLUDE_DIR)
+            print('-- Detected cuDNN at ' + CUDNN_LIBRARY + ', ' + CUDNN_INCLUDE_DIR)
         else:
             print('-- Not using cuDNN')
         if WITH_CUDA:
@@ -244,51 +306,7 @@ class build_ext(setuptools.command.build_ext.build_ext):
         else:
             print('-- Building without distributed package')
 
-        # Do we actually need this here?
-        if WITH_NNPACK:
-            nnpack_dir = NNPACK_LIB_PATHS[0]
-            print('-- Detected NNPACK at ' + nnpack_dir)
-        else:
-            print('-- Not using NNPACK')
-        # cwrap depends on pyyaml, so we can't import it earlier
-        from tools.cwrap import cwrap
-        from tools.cwrap.plugins.THPPlugin import THPPlugin
-        from tools.cwrap.plugins.ArgcountSortPlugin import ArgcountSortPlugin
-        from tools.cwrap.plugins.AutoGPU import AutoGPU
-        from tools.cwrap.plugins.BoolOption import BoolOption
-        from tools.cwrap.plugins.KwargsPlugin import KwargsPlugin
-        from tools.cwrap.plugins.NullableArguments import NullableArguments
-
-        from tools.cwrap.plugins.CuDNNPlugin import CuDNNPlugin
-        from tools.cwrap.plugins.WrapDim import WrapDim
-        from tools.cwrap.plugins.AssertNDim import AssertNDim
-
-        from tools.cwrap.plugins.Broadcast import Broadcast
-        from tools.cwrap.plugins.ProcessorSpecificPlugin import ProcessorSpecificPlugin
-        from tools.autograd.gen_variable_type import gen_variable_type
-        from tools.jit.gen_jit_dispatch import gen_jit_dispatch
-        thp_plugin = THPPlugin()
-
-        cwrap('torch/csrc/generic/TensorMethods.cwrap', plugins=[
-            ProcessorSpecificPlugin(), BoolOption(), thp_plugin,
-            AutoGPU(condition='IS_CUDA'), ArgcountSortPlugin(), KwargsPlugin(),
-            AssertNDim(), WrapDim(), Broadcast()
-        ])
-        cwrap('torch/csrc/cudnn/cuDNN.cwrap', plugins=[
-            CuDNNPlugin(), NullableArguments()
-        ])
-        # Build ATen based Variable classes
-        autograd_gen_dir = 'torch/csrc/autograd/generated'
-        jit_gen_dir = 'torch/csrc/jit/generated'
-        for d in (autograd_gen_dir, jit_gen_dir):
-            if not os.path.exists(d):
-                os.mkdir(d)
-        gen_variable_type(
-            'torch/lib/tmp_install/share/ATen/Declarations.yaml',
-            autograd_gen_dir)
-        gen_jit_dispatch(
-            'torch/lib/tmp_install/share/ATen/Declarations.yaml',
-            jit_gen_dir)
+        generate_code(ninja_global)
 
         if IS_WINDOWS:
             build_temp = self.build_temp
@@ -305,9 +323,15 @@ class build_ext(setuptools.command.build_ext.build_ext):
             else:
                 # To generate .obj files for AutoGPU for the export class
                 # a header file cannot build, so it has to be copied to someplace as a source file
+                if not os.path.exists("torch/csrc/generated"):
+                    os.mkdir("torch/csrc/generated")
                 if os.path.exists("torch/csrc/generated/AutoGPU_cpu_win.cpp"):
                     os.remove("torch/csrc/generated/AutoGPU_cpu_win.cpp")
                 shutil.copyfile("torch/csrc/cuda/AutoGPU.h", "torch/csrc/generated/AutoGPU_cpu_win.cpp")
+        if WITH_NINJA:
+            # before we start the normal build make sure all generated code
+            # gets built
+            ninja_global.run()
 
         # It's an old-style class in Python 2.7...
         setuptools.command.build_ext.build_ext.run(self)
@@ -324,6 +348,13 @@ class install(setuptools.command.install.install):
     def run(self):
         if not self.skip_build:
             self.run_command('build_deps')
+
+        # Copy headers necessary to compile C++ extensions.
+        self.copy_tree('torch/csrc', 'torch/lib/include/torch/csrc/')
+        self.copy_tree('torch/lib/pybind11/include/pybind11/',
+                       'torch/lib/include/pybind11')
+        self.copy_file('torch/torch.h', 'torch/lib/include/torch/torch.h')
+
         setuptools.command.install.install.run(self)
 
 
@@ -359,6 +390,10 @@ if IS_WINDOWS:
                           # structured exception handling (SEH)
                           # /DNOMINMAX removes builtin min/max functions
                           ]
+    if sys.version_info[0] == 2:
+        # /bigobj increases number of sections in .obj file, which is needed to link
+        # against libaries in Python 2.7 under Windows
+        extra_compile_args.append('/bigobj')
 else:
     extra_compile_args = ['-std=c++11', '-Wno-write-strings',
                           # Python 2.6 requires -fno-strict-aliasing, see
@@ -372,16 +407,6 @@ else:
 cwd = os.path.dirname(os.path.abspath(__file__))
 lib_path = os.path.join(cwd, "torch", "lib")
 
-
-# Check if you remembered to check out submodules
-def check_file(f):
-    if not os.path.exists(f):
-        print("Could not find {}".format(f))
-        print("Did you run 'git submodule update --init'?")
-        sys.exit(1)
-check_file(os.path.join(lib_path, "gloo", "CMakeLists.txt"))
-check_file(os.path.join(lib_path, "nanopb", "CMakeLists.txt"))
-check_file(os.path.join(lib_path, "pybind11", "CMakeLists.txt"))
 
 tmp_install_path = lib_path + "/tmp_install"
 include_dirs += [
@@ -430,32 +455,50 @@ main_sources = [
     "torch/csrc/utils/invalid_arguments.cpp",
     "torch/csrc/utils/object_ptr.cpp",
     "torch/csrc/utils/python_arg_parser.cpp",
-    "torch/csrc/utils/tensor_geometry.cpp",
+    "torch/csrc/utils/tensor_list.cpp",
+    "torch/csrc/utils/tensor_new.cpp",
+    "torch/csrc/utils/tensor_numpy.cpp",
+    "torch/csrc/utils/tensor_types.cpp",
     "torch/csrc/utils/tuple_parser.cpp",
+    "torch/csrc/utils/tensor_apply.cpp",
+    "torch/csrc/utils/tensor_flatten.cpp",
+    "torch/csrc/utils/variadic.cpp",
     "torch/csrc/allocators.cpp",
     "torch/csrc/serialization.cpp",
     "torch/csrc/jit/init.cpp",
     "torch/csrc/jit/interpreter.cpp",
     "torch/csrc/jit/ir.cpp",
+    "torch/csrc/jit/fusion_compiler.cpp",
+    "torch/csrc/jit/graph_executor.cpp",
     "torch/csrc/jit/python_ir.cpp",
     "torch/csrc/jit/test_jit.cpp",
     "torch/csrc/jit/tracer.cpp",
     "torch/csrc/jit/python_tracer.cpp",
+    "torch/csrc/jit/passes/shape_analysis.cpp",
     "torch/csrc/jit/interned_strings.cpp",
     "torch/csrc/jit/type.cpp",
     "torch/csrc/jit/export.cpp",
+    "torch/csrc/jit/autodiff.cpp",
     "torch/csrc/jit/interpreter_autograd_function.cpp",
     "torch/csrc/jit/python_arg_flatten.cpp",
     "torch/csrc/jit/python_compiled_function.cpp",
+    "torch/csrc/jit/variable_flags.cpp",
+    "torch/csrc/jit/passes/create_autodiff_subgraphs.cpp",
     "torch/csrc/jit/passes/graph_fuser.cpp",
     "torch/csrc/jit/passes/onnx.cpp",
     "torch/csrc/jit/passes/dead_code_elimination.cpp",
     "torch/csrc/jit/passes/common_subexpression_elimination.cpp",
     "torch/csrc/jit/passes/peephole.cpp",
     "torch/csrc/jit/passes/inplace_check.cpp",
+    "torch/csrc/jit/passes/canonicalize.cpp",
+    "torch/csrc/jit/passes/batch_mm.cpp",
     "torch/csrc/jit/passes/onnx/peephole.cpp",
     "torch/csrc/jit/generated/aten_dispatch.cpp",
+    "torch/csrc/jit/script/lexer.cpp",
+    "torch/csrc/jit/script/compiler.cpp",
+    "torch/csrc/jit/script/init.cpp",
     "torch/csrc/autograd/init.cpp",
+    "torch/csrc/autograd/grad_mode.cpp",
     "torch/csrc/autograd/engine.cpp",
     "torch/csrc/autograd/function.cpp",
     "torch/csrc/autograd/variable.cpp",
@@ -468,27 +511,22 @@ main_sources = [
     "torch/csrc/autograd/python_variable_indexing.cpp",
     "torch/csrc/autograd/python_engine.cpp",
     "torch/csrc/autograd/python_hook.cpp",
-    "torch/csrc/autograd/functions/jit_closure.cpp",
     "torch/csrc/autograd/generated/VariableType.cpp",
     "torch/csrc/autograd/generated/Functions.cpp",
+    "torch/csrc/autograd/generated/python_torch_functions.cpp",
     "torch/csrc/autograd/generated/python_variable_methods.cpp",
     "torch/csrc/autograd/generated/python_functions.cpp",
     "torch/csrc/autograd/generated/python_nn_functions.cpp",
-    "torch/csrc/autograd/functions/batch_normalization.cpp",
-    "torch/csrc/autograd/functions/convolution.cpp",
     "torch/csrc/autograd/functions/basic_ops.cpp",
     "torch/csrc/autograd/functions/tensor.cpp",
     "torch/csrc/autograd/functions/accumulate_grad.cpp",
     "torch/csrc/autograd/functions/special.cpp",
     "torch/csrc/autograd/functions/utils.cpp",
     "torch/csrc/autograd/functions/init.cpp",
-    "torch/csrc/autograd/functions/onnx/convolution.cpp",
-    "torch/csrc/autograd/functions/onnx/batch_normalization.cpp",
-    "torch/csrc/autograd/functions/onnx/basic_ops.cpp",
     "torch/csrc/onnx/onnx.pb.cpp",
     "torch/csrc/onnx/onnx.cpp",
 ]
-main_sources += split_types("torch/csrc/Tensor.cpp")
+main_sources += split_types("torch/csrc/Tensor.cpp", ninja_global)
 
 try:
     import numpy as np
@@ -544,7 +582,7 @@ if WITH_CUDA:
     cuda_include_path = os.path.join(CUDA_HOME, 'include')
     include_dirs.append(cuda_include_path)
     include_dirs.append(tmp_install_path + "/include/THCUNN")
-    extra_compile_args += ['-DWITH_CUDA', '-DAT_CUDA_ENABLED']
+    extra_compile_args += ['-DWITH_CUDA']
     extra_compile_args += ['-DCUDA_LIB_PATH=' + cuda_lib_path]
     main_libraries += ['cudart', nvtoolext_lib_name]
     main_sources += [
@@ -553,11 +591,12 @@ if WITH_CUDA:
         "torch/csrc/cuda/Stream.cpp",
         "torch/csrc/cuda/AutoGPU.cpp",
         "torch/csrc/cuda/utils.cpp",
+        "torch/csrc/cuda/comm.cpp",
+        "torch/csrc/cuda/python_comm.cpp",
         "torch/csrc/cuda/expand_utils.cpp",
         "torch/csrc/cuda/serialization.cpp",
-        "torch/csrc/jit/fusion_compiler.cpp",
     ]
-    main_sources += split_types("torch/csrc/cuda/Tensor.cpp")
+    main_sources += split_types("torch/csrc/cuda/Tensor.cpp", ninja_global)
 
 if WITH_NCCL:
     if WITH_SYSTEM_NCCL:
@@ -568,6 +607,7 @@ if WITH_NCCL:
     extra_compile_args += ['-DWITH_NCCL']
     main_sources += [
         "torch/csrc/cuda/nccl.cpp",
+        "torch/csrc/cuda/python_nccl.cpp",
     ]
 if WITH_CUDNN:
     main_libraries += ['cudnn']
@@ -576,24 +616,7 @@ if WITH_CUDNN:
     include_dirs.insert(0, CUDNN_INCLUDE_DIR)
     if not IS_WINDOWS:
         extra_link_args.insert(0, '-Wl,-rpath,' + CUDNN_LIB_DIR)
-    main_sources += [
-        "torch/csrc/cudnn/BatchNorm.cpp",
-        "torch/csrc/cudnn/Conv.cpp",
-        "torch/csrc/cudnn/cuDNN.cpp",
-        "torch/csrc/cudnn/GridSampler.cpp",
-        "torch/csrc/cudnn/AffineGridGenerator.cpp",
-        "torch/csrc/cudnn/Types.cpp",
-        "torch/csrc/cudnn/Handles.cpp",
-    ]
     extra_compile_args += ['-DWITH_CUDNN']
-
-if WITH_NNPACK:
-    include_dirs.extend(NNPACK_INCLUDE_DIRS)
-    main_link_args.extend(NNPACK_LIB_PATHS)
-    main_sources += [
-        "torch/csrc/nnpack/NNPACK.cpp",
-    ]
-    extra_compile_args += ['-DWITH_NNPACK']
 
 if DEBUG:
     if IS_WINDOWS:
@@ -601,6 +624,9 @@ if DEBUG:
     else:
         extra_compile_args += ['-O0', '-g']
         extra_link_args += ['-O0', '-g']
+
+if WITH_SCALARS:
+    extra_compile_args += ['-DWITH_SCALARS']
 
 if os.getenv('PYTORCH_BINARY_BUILD') and platform.system() == 'Linux':
     print('PYTORCH_BINARY_BUILD found. Static linking libstdc++ on Linux')
@@ -698,8 +724,10 @@ if WITH_CUDA:
 version = '0.4.0a0'
 if os.getenv('PYTORCH_BUILD_VERSION'):
     assert os.getenv('PYTORCH_BUILD_NUMBER') is not None
-    version = os.getenv('PYTORCH_BUILD_VERSION') \
-        + '_' + os.getenv('PYTORCH_BUILD_NUMBER')
+    build_number = int(os.getenv('PYTORCH_BUILD_NUMBER'))
+    version = os.getenv('PYTORCH_BUILD_VERSION')
+    if build_number > 1:
+        version += '.post' + str(build_number)
 else:
     try:
         sha = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=cwd).decode('ascii').strip()
@@ -719,19 +747,35 @@ cmdclass = {
 }
 cmdclass.update(build_dep_cmds)
 
-
-setup(name="torch", version=version,
-      description="Tensors and Dynamic neural networks in Python with strong GPU acceleration",
-      ext_modules=extensions,
-      cmdclass=cmdclass,
-      packages=packages,
-      package_data={'torch': [
-          'lib/*.so*', 'lib/*.dylib*', 'lib/*.dll',
-          'lib/torch_shm_manager',
-          'lib/*.h',
-          'lib/include/TH/*.h', 'lib/include/TH/generic/*.h',
-          'lib/include/THC/*.h', 'lib/include/THC/generic/*.h',
-          'lib/include/ATen/*.h',
-      ]},
-      install_requires=['pyyaml', 'numpy'],
-      )
+if __name__ == '__main__':
+    setup(
+        name="torch",
+        version=version,
+        description=("Tensors and Dynamic neural networks in "
+                     "Python with strong GPU acceleration"),
+        ext_modules=extensions,
+        cmdclass=cmdclass,
+        packages=packages,
+        package_data={
+            'torch': [
+                'lib/*.so*',
+                'lib/*.dylib*',
+                'lib/*.dll',
+                'lib/*.lib',
+                'lib/torch_shm_manager',
+                'lib/*.h',
+                'lib/include/ATen/*.h',
+                'lib/include/pybind11/*.h',
+                'lib/include/pybind11/detail/*.h',
+                'lib/include/TH/*.h',
+                'lib/include/TH/generic/*.h',
+                'lib/include/THC/*.h',
+                'lib/include/THC/generic/*.h',
+                'lib/include/torch/csrc/*.h',
+                'lib/include/torch/csrc/autograd/*.h',
+                'lib/include/torch/csrc/jit/*.h',
+                'lib/include/torch/csrc/utils/*.h',
+                'lib/include/torch/torch.h',
+            ]
+        },
+        install_requires=['pyyaml', 'numpy'], )

@@ -3,6 +3,10 @@
 #include "GlooCache.hpp"
 #include "Store.hpp"
 
+#if defined(WITH_GLOO_IBVERBS) && WITH_GLOO_IBVERBS
+#include "gloo/transport/ibverbs/device.h"
+#endif
+
 #include "gloo/transport/tcp/device.h"
 
 #include <algorithm>
@@ -31,6 +35,7 @@
   switch (type) {                                                             \
     case ::at::ScalarType::Float: func<float>(args); break;                   \
     case ::at::ScalarType::Double: func<double>(args); break;                 \
+    case ::at::ScalarType::Half: func<gloo::float16>(args); break;            \
     default:                                                                  \
       throw std::runtime_error("Invalid " + std::string(#func) + " function type"); \
   }
@@ -68,11 +73,36 @@ DataChannelGloo::DataChannelGloo(InitMethod::Config config)
 {
   _num_processes = config.world_size;
 
-  // Default options listen on this host's name.
-  // NOTE: when hostname has bad configuration in `/etc/hosts` processes
-  // will not connect to each other.
-  ::gloo::transport::tcp::attr attr(config.public_address.c_str());
-  _device = ::gloo::transport::tcp::CreateDevice(attr);
+#if defined(WITH_GLOO_IBVERBS) && WITH_GLOO_IBVERBS
+
+  // This helper function automatically detects the IB device in the system
+  auto ibDeviceNames = ::gloo::transport::ibverbs::getDeviceNames();
+
+  // If there are IB devices, we will use IB
+  if (!ibDeviceNames.empty()) {
+    // Currently, gloo only supports a single IB device and will use the first
+    auto ibDeviceToUse = ibDeviceNames[0];
+
+    ::gloo::transport::ibverbs::attr attr = {
+      .name = ibDeviceToUse,
+      .port = 1,
+      .index = 0,
+    };
+
+    _deviceList.push_back(::gloo::transport::ibverbs::CreateDevice(attr));
+
+  // Otherwise, fallback to use TCP instead
+  } else
+
+#endif
+
+  {
+    // Default options listen on this host's name.
+    // NOTE: when hostname has bad configuration in `/etc/hosts` processes
+    // will not connect to each other.
+    ::gloo::transport::tcp::attr attr(config.public_address.c_str());
+    _deviceList.push_back(::gloo::transport::tcp::CreateDevice(attr));
+  }
 
   if (_rank == 0) {
     _addr = "localhost";
@@ -87,9 +117,10 @@ DataChannelGloo::DataChannelGloo(InitMethod::Config config)
 
 DataChannelGloo::~DataChannelGloo() {}
 
+void DataChannelGloo::destroy() {}
 
 bool DataChannelGloo::init() {
-  _cache = std::unique_ptr<GlooCache>(new GlooCache(_rank, _device));
+  _cache = std::unique_ptr<GlooCache>(new GlooCache(_rank, _deviceList));
 
   std::vector<rank_type> ranks;
   ranks.reserve(_num_processes);
@@ -264,6 +295,49 @@ auto DataChannelGloo::isend(at::Tensor& data, rank_type dst_rank) -> RequestGloo
 
 auto DataChannelGloo::ireceive(at::Tensor& data, rank_type src_rank) -> RequestGloo* {
   throw std::runtime_error("DataChannelGloo does not support ireceive");
+}
+
+
+void DataChannelGloo::allReduce(std::vector<at::Tensor>& data,
+                                THDReduceOp operation,
+                                THDGroup groupId) {
+
+  throw std::runtime_error("DataChannelGloo does not support mult-GPU cross "
+                           "node allreduce");
+}
+
+
+void DataChannelGloo::allGather(std::vector<at::Tensor>& output,
+                                std::vector<at::Tensor>& input,
+                                THDGroup groupId) {
+
+  throw std::runtime_error("DataChannelGloo does not support mult-GPU cross "
+                           "node allgather");
+}
+
+
+void DataChannelGloo::reduce(std::vector<at::Tensor>& data,
+                             THDReduceOp operation,
+                             rank_type dstRank,
+                             THDGroup groupId) {
+
+  throw std::runtime_error("DataChannelGloo does not support mult-GPU cross "
+                           "node reduce");
+}
+
+
+void DataChannelGloo::broadcast(std::vector<at::Tensor>& data,
+                                rank_type srcRank,
+                                THDGroup groupId) {
+
+  throw std::runtime_error("DataChannelGloo does not support mult-GPU cross "
+                           "node broadcast");
+}
+
+
+void DataChannelGloo::clearGroupCache(THDGroup group_id) {
+  throw std::runtime_error("DataChannelGloo does not support clear "
+                           "group cache");
 }
 
 

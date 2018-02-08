@@ -58,7 +58,7 @@ public:
 
   bool load(handle src, bool) {
     try {
-      value = torch::jit::stringToSymbol(py::cast<std::string>(src));
+      value = torch::jit::Symbol(py::cast<std::string>(src));
     } catch (std::exception& e) {
       return false;
     }
@@ -66,7 +66,7 @@ public:
   }
 
   static handle cast(torch::jit::Symbol src, return_value_policy /* policy */, handle /* parent */) {
-    return py::cast(std::string(torch::jit::symbolToString(src)), return_value_policy::copy).release();
+    return py::cast(std::string(src.toString()), return_value_policy::copy).release();
   }
 };
 
@@ -96,3 +96,14 @@ template<> struct type_caster<std::vector<torch::jit::Node *>> : ListCasterBase 
 
 }} // namespace pybind11::detail
 
+namespace torch { namespace jit {
+
+static inline py::tuple tuple_tail(const py::tuple & tup) {
+  py::tuple r(tup.size() - 1);
+  for(std::size_t i = 1; i < tup.size(); i++) {
+    r[i-1] = tup[i];
+  }
+  return r;
+}
+
+}}

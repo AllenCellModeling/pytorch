@@ -12,6 +12,7 @@
 #include "ATen/ScalarType.h"
 #include "ATen/Scalar.h"
 #include "ATen/Tensor.h"
+#include "ATen/Allocator.h"
 
 // To solve the conflict of s_addr in inaddr.h
 #ifdef _MSC_VER
@@ -25,6 +26,7 @@ namespace at {
 class Context;
 struct Storage;
 struct Generator;
+struct Allocator;
 
 // Note [Empty versus 0-dim tensors]
 // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -62,8 +64,10 @@ struct AT_API Type {
   virtual std::unique_ptr<Storage> storage() const = 0;
   virtual std::unique_ptr<Storage> storage(size_t size) const = 0;
   virtual std::unique_ptr<Storage> storageFromBlob(void * data, int64_t size, const std::function<void(void*)> & deleter=noop_deleter) const = 0;
+  virtual std::unique_ptr<Storage> storageWithAllocator(int64_t size, std::unique_ptr<Allocator> allocator) const = 0;
   virtual std::unique_ptr<Generator> generator() const = 0;
   virtual Tensor unsafeTensorFromTH(void * th_pointer, bool retain) const = 0;
+  virtual std::unique_ptr<Storage> unsafeStorageFromTH(void * th_pointer, bool retain) const = 0;
   virtual const char * toString() const = 0;
   virtual std::size_t elementSizeInBytes() const = 0;
   virtual Type & toBackend(Backend b) const;
@@ -74,15 +78,18 @@ struct AT_API Type {
   // for external dispatch
   virtual TypeID ID() const = 0;
 
-  Tensor copy(const Tensor & src) const;
-  void copy(const Tensor & src, Tensor & dst) const;
-  virtual void s_copy(const Tensor & src, Tensor & dst) const = 0;
+  Tensor copy(const Tensor & src, bool non_blocking=false) const;
+  Tensor & copy_(Tensor & self, const Tensor & src, bool non_blocking=false) const;
+  virtual Tensor & s_copy_(Tensor & self, const Tensor & src, bool non_blocking) const = 0;
 
-  Tensor tensorFromBlob(void * data, IntList sizes, const std::function<void(void*)> & deleter=noop_deleter);
-  Tensor tensorFromBlob(void * data, IntList sizes, IntList strides, const std::function<void(void*)> & deleter=noop_deleter);
+  Tensor tensorFromBlob(void * data, IntList sizes, const std::function<void(void*)> & deleter=noop_deleter) const;
+  Tensor tensorFromBlob(void * data, IntList sizes, IntList strides, const std::function<void(void*)> & deleter=noop_deleter) const;
+  Tensor tensorWithAllocator(IntList sizes, std::unique_ptr<Allocator> allocator) const;
+  Tensor tensorWithAllocator(IntList sizes, IntList strides, std::unique_ptr<Allocator> allocator) const;
   Tensor scalarTensor(Scalar s) const;
 
   bool operator==(const Type& other) const;
+  bool operator!=(const Type& other) const;
 
   // example
   // virtual Tensor * add(Tensor & a, Tensor & b) = 0;

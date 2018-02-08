@@ -1,52 +1,18 @@
 #include "Python.h"
 #include "function.h"
 
-#include <string>
-
 #include "variable.h"
 #include "torch/csrc/jit/ir.h"
+#include "torch/csrc/autograd/grad_mode.h"
 #include "torch/csrc/autograd/functions/special.h"
+
+#include <string>
+#include <cstdint>
+#include <vector>
 
 namespace torch { namespace autograd {
 
-template<typename T>
-auto makeFlags(const T &inputs) -> FunctionFlags {
-  int num_inputs = inputs.size();
-  FunctionFlags f;
-  f.is_executable = false;
-  f.is_volatile = false;
-  f.next_functions.resize(num_inputs);
-  {
-    int i = 0;
-    for (auto it = inputs.begin(); it != inputs.end(); ++it, ++i) {
-      auto& var = *it;
-      if (var.defined()) {
-        f.is_executable |= var.requires_grad();
-        f.is_volatile |= var.is_volatile();
-        if (var.grad_fn()) {
-          f.next_functions[i] = std::make_pair<>(var.grad_fn(), var.output_nr());
-        } else {
-          f.next_functions[i] = std::make_pair<>(var.grad_accumulator(), 0);
-        }
-      }
-    }
-  }
-  f.is_executable &= !f.is_volatile;
-  return f;
-}
-
-auto Function::flags(const variable_list& inputs) -> FunctionFlags {
-  return makeFlags(inputs);
-}
-
-auto Function::flags(const std::initializer_list<Variable>& inputs) -> FunctionFlags {
-  return makeFlags(inputs);
-}
-
-auto Function::flags(at::TensorList inputs) -> FunctionFlags {
-  // TODO: Eliminate the intermediate vector allocation
-  return makeFlags(variable_list(inputs.begin(), inputs.end()));
-}
+thread_local uint64_t Function::function_counter = 0;
 
 auto Function::name() -> std::string {
   return std::string(typeid(*this).name());
@@ -66,7 +32,11 @@ variable_list Function::tracedApply(variable_list inputs) {
 
   // Insert a CppOp in the trace.
   auto& graph = state->graph;
-  auto* this_node = graph->createCppOp(getSharedPtr());
+  std::vector<VariableFlags> var_flags;
+  for(auto & input: inputs) {
+    var_flags.push_back(VariableFlags::of(input));
+  }
+  auto* this_node = graph->createCppOp(getSharedPtr(), std::move(var_flags));
   this_node->setSourceLocation(std::make_shared<SourceLocation>(
         jit::tracer::getPythonInterpreterStackTrace()
   ));

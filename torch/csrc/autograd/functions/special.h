@@ -12,26 +12,21 @@
 namespace torch { namespace autograd {
 
 struct EvalOutput : Function {
-  EvalOutput(const edge_type& next_edge)
-    : next_edge(next_edge) {
+  explicit EvalOutput(const Edge& next_edge_)
+    : next_edge(next_edge_) {
     num_inputs = 1;
-    // It would be nice if we could inherit this from the function of next_edge,
-    // but we want to always run this node to capture the output. This might
-    // confuse some of the functions causing them to do unnecessary work.
-    // TODO: it should be possible to improve this once we get rid of NULL Variables
-    is_executable = true;
   }
 
   virtual variable_list apply(const variable_list& inputs) override {
     throw std::logic_error("EvalOutput::apply() called");
   }
 
-  edge_type next_edge;
+  Edge next_edge;
 };
 
 struct Eval : Function {
-  using edge_set = std::unordered_set<edge_type, edge_hasher>;
-  using edge_order = std::unordered_map<edge_type, int, edge_hasher>;
+  using edge_set = std::unordered_set<Edge>;
+  using edge_order = std::unordered_map<Edge, int>;
   using placeholder_list = std::vector<std::shared_ptr<EvalOutput>>;
 
   // This struct has only one member, but it's useful to e.g. add a set of all
@@ -91,7 +86,6 @@ struct Eval : Function {
 
 private:
   std::pair<function_list, variable_list> filterRoots(const variable_list& inputs);
-  Engine::pre_callback_map getCallbacks(variable_list& outputs, std::mutex& outputs_mutex);
 
   Subgraph getSubgraph(
       const variable_list& inputs,
