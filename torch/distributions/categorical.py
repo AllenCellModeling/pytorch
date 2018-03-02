@@ -1,5 +1,5 @@
 import torch
-from torch.autograd import Variable
+from torch.autograd import Variable, variable
 from torch.distributions import constraints
 from torch.distributions.distribution import Distribution
 from torch.distributions.utils import probs_to_logits, logits_to_probs, log_sum_exp, lazy_property, broadcast_all
@@ -34,8 +34,8 @@ class Categorical(Distribution):
         [torch.LongTensor of size 1]
 
     Args:
-        probs (Tensor or Variable): event probabilities
-        logits (Tensor or Variable): event log probabilities
+        probs (Tensor): event probabilities
+        logits (Tensor): event log probabilities
     """
     params = {'probs': constraints.simplex}
     has_enumerate_support = True
@@ -73,11 +73,11 @@ class Categorical(Distribution):
 
     @property
     def mean(self):
-        return self.probs.new([float('nan')]).expand(self._extended_shape())
+        return self.probs.new_tensor(float('nan')).expand(self._extended_shape())
 
     @property
     def variance(self):
-        return self.probs.new([float('nan')]).expand(self._extended_shape())
+        return self.probs.new_tensor(float('nan')).expand(self._extended_shape())
 
     def sample(self, sample_shape=torch.Size()):
         sample_shape = self._extended_shape(sample_shape)

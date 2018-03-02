@@ -1,41 +1,43 @@
 {
-	"base-machine": "Mac Mini with 2.3 GHz i7 processors, 16GB RAM, 250GB SSD",
-	"docker-settings": "4 cores, 8GB RAM",
-	
-	"commit": "92aeca1279265d24493dc6ced7dde9a368faf048",
+	"commit": "492466f25fdf12b62f2043587130e9ee393e4b1c",
+
+	"cpu-test-base-machine": "Mac Mini with 2.3 GHz i7 processors, 16GB RAM, 250GB SSD",
+	"cpu-test-docker-settings": "2 cores, 4GB RAM",
 
 	"test_cpu_speed_mini_sequence_labeler": {
-		"mean": "2.62557", 
-		"sigma": "0.12167"
-	}, 
-
-	"test_cpu_speed_mnist": {
-		"mean": "18.79468", 
-		"sigma": "2.37561"
+		"mean": "6.75325",
+		"sigma": "0.62155"
 	},
 
+	"test_cpu_speed_mnist": {
+		"mean": "30.86437",
+		"sigma": "2.0945721121747041"
+	},
+
+	"gpu-test-base-machine": "g3.8xlarge",
+
 	"test_gpu_speed_mnist": {
-		"mean": "13.76155",
-		"sigma": "0.42087"
+		"mean": "11.66185",
+		"sigma": "0.29402"
 	},
 
 	"test_gpu_speed_word_language_model": {
-		"mean": "115.5332",
-		"sigma": "0.10897"
+		"mean": "5.9411499999999995",
+		"sigma": "0.02134777505971057"
 	},
 
 	"test_gpu_speed_cudnn_lstm": {
-		"mean": "4.9698",
-		"sigma": "0.03257"
+		"mean": "4.98804",
+		"sigma": "0.21906"
 	},
 
 	"test_gpu_speed_lstm": {
-		"mean": "5.15325",
-		"sigma": "0.0725"
+		"mean": "5.27968",
+		"sigma": "0.13834"
 	},
 
 	"test_gpu_speed_mlstm": {
-		"mean": "4.04270",
-		"sigma": "0.03276"
+		"mean": "4.11562",
+		"sigma": "0.0722"
 	}
 }

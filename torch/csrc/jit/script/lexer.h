@@ -7,6 +7,8 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
+#include "torch/csrc/jit/source_location.h"
+
 
 namespace torch {
 namespace jit {
@@ -55,6 +57,7 @@ namespace script {
   _(TK_ELSE, "else", "else")                     \
   _(TK_ELIF, "elif", "elif")                     \
   _(TK_WHILE, "while", "while")                  \
+  _(TK_EXPR_STMT, "expression statement", "")    \
   _(TK_NE, "ne", "!=")                           \
   _(TK_EQ, "eq", "==")                           \
   _(TK_LE, "le", "<=")                           \
@@ -73,6 +76,7 @@ namespace script {
   _(TK_GLOBAL, "global", "global")               \
   _(TK_BUILT_IN, "built-in", "")                 \
   _(TK_SLICE, "slice", "")                       \
+  _(TK_VAR, "variable", "")                      \
   _(TK_GATHER, "gather", "")
 static const char* valid_single_char_tokens = "+-*/()[]:,={}><.";
 
@@ -87,6 +91,7 @@ enum TokenKind {
 };
 
 std::string kindToString(int kind);
+int stringToKind(std::string str);
 
 // nested hash tables that indicate char-by-char what is a valid token.
 struct TokenTrie;
@@ -302,7 +307,7 @@ SharedParserData& sharedParserData();
 // a range of a shared string 'file_' with functions to help debug by highlight
 // that
 // range.
-struct SourceRange {
+struct SourceRange : public SourceLocation {
   SourceRange(
       const std::shared_ptr<std::string>& file_,
       size_t start_,
@@ -314,7 +319,7 @@ struct SourceRange {
   size_t size() const {
     return end() - start();
   }
-  void highlight(std::ostream& out) const {
+  virtual void highlight(std::ostream& out) const override {
     const std::string& str = file();
     size_t begin = start();
     size_t end = start();
@@ -461,7 +466,7 @@ struct Lexer {
         nesting--;
         break;
       case TK_WHITESPACE: {
-        size_t depth = r.range.size();
+        int depth = r.range.size();
         if (depth > indent_stack.back()) {
           indent_stack.push_back(depth);
           r.kind = TK_INDENT;

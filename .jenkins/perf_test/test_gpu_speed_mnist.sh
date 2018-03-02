@@ -6,7 +6,7 @@ test_gpu_speed_mnist () {
   export OMP_NUM_THREADS=4
   export MKL_NUM_THREADS=4
 
-  git clone https://github.com/yf225/examples.git -b benchmark_test
+  git clone https://github.com/pytorch/examples.git -b perftests
 
   cd examples/mnist
 
@@ -16,7 +16,7 @@ test_gpu_speed_mnist () {
   python main.py --epochs 0
 
   SAMPLE_ARRAY=()
-  NUM_RUNS=5
+  NUM_RUNS=20
 
   for (( i=1; i<=$NUM_RUNS; i++ )) do
     runtime=$(get_runtime_of_command "python main.py --epochs 1 --no-log")

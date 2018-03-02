@@ -20,8 +20,8 @@ class Normal(ExponentialFamily):
         [torch.FloatTensor of size 1]
 
     Args:
-        loc (float or Tensor or Variable): mean of the distribution (often referred to as mu)
-        scale (float or Tensor or Variable): standard deviation of the distribution
+        loc (float or Tensor): mean of the distribution (often referred to as mu)
+        scale (float or Tensor): standard deviation of the distribution
             (often referred to as sigma)
     """
     params = {'loc': constraints.real, 'scale': constraints.positive}
@@ -51,7 +51,8 @@ class Normal(ExponentialFamily):
 
     def sample(self, sample_shape=torch.Size()):
         shape = self._extended_shape(sample_shape)
-        return torch.normal(self.loc.expand(shape), self.scale.expand(shape))
+        with torch.no_grad():
+            return torch.normal(self.loc.expand(shape), self.scale.expand(shape))
 
     def rsample(self, sample_shape=torch.Size()):
         shape = self._extended_shape(sample_shape)
