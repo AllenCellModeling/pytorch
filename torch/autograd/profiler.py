@@ -6,12 +6,7 @@ import itertools
 from collections import defaultdict
 
 import torch
-
-try:
-    FileNotFoundError
-except NameError:
-    # py2.7
-    FileNotFoundError = IOError
+from torch._six import FileNotFoundError
 
 
 class range(object):
@@ -147,7 +142,7 @@ class profile(object):
         instance should be enabled at any given time.
 
     Example:
-        >>> x = Variable(torch.randn(1, 1), requires_grad=True)
+        >>> x = torch.randn((1, 1), requires_grad=True)
         >>> with torch.autograd.profiler.profile() as prof:
         ...     y = x ** 2
         ...     y.backward()
@@ -397,7 +392,7 @@ def demangle(name):
             orig_name = subprocess.check_output(filt_cmd, stderr=devnull).rstrip().decode("ascii")
             orig_name = re.search('is :- \"(.*)"', orig_name).group(1) if is_win else orig_name
             return orig_name
-    except (subprocess.CalledProcessError, AttributeError, FileNotFoundError):
+    except (subprocess.CalledProcessError, AttributeError, FileNotFoundError, OSError):
         return name
 
 
@@ -536,7 +531,7 @@ def parse_nvprof_trace(path):
                           row['kernel_start'],
                           row['kernel_end'])
 
-    functions.sort(key=lambda evt: evt.start)
+    functions.sort(key=lambda evt: evt.cpu_interval.start)
     return functions
 
 

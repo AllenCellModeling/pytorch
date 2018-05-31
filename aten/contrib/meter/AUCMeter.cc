@@ -29,12 +29,12 @@ void AUCMeter::value(Tensor& val) {
    int64_t * sortidx_d = sortidx.data<int64_t>();
    int16_t * targets_d = sortidx.data<int16_t>();
    // construct the ROC curve:
-   Tensor tpr = CPU(kDouble).zeros({numel(outputs)});
-   Tensor fpr = CPU(kDouble).zeros({numel(outputs)});
+   Tensor tpr = zeros(CPU(kDouble), {numel(outputs)});
+   Tensor fpr = zeros(CPU(kDouble), {numel(outputs)});
 
    double * tpr_d = tpr.data<double>();
    double * fpr_d = fpr.data<double>();
-   for(uint64_t n = 1; n <= numel(outputs); ++n) {
+   for(long n = 1; n <= numel(outputs); ++n) {
       if(targets_d[sortidx_d[n - 1]] == 1) {
          tpr_d[n] = tpr_d[n - 1] + 1.;
          fpr_d[n] = fpr_d[n - 1];

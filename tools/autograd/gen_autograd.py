@@ -19,7 +19,7 @@ derivatives_path = os.path.join(os.path.dirname(__file__), 'derivatives.yaml')
 deprecated_path = os.path.join(os.path.dirname(__file__), 'deprecated.yaml')
 
 VIEW_FUNCTIONS = {
-    'alias', 'as_strided', 'expand', 'narrow', 'permute', 'select', 'slice',
+    'alias', 'as_strided', 'diagonal', 'expand', 'narrow', 'permute', 'select', 'slice',
     'squeeze', 't', 'transpose', 'unfold', 'unsqueeze', 'view',
 }
 
@@ -63,6 +63,11 @@ def load_aten_declarations(path):
         declaration['formals'] = [arg['type'] + ' ' + arg['name']
                                   for arg in declaration['arguments']]
         declaration['args'] = [arg['name'] for arg in declaration['arguments']]
+        declaration['type_method_formals'] = [arg['type'] + ' ' + arg['name']
+                                              for arg in declaration['arguments']
+                                              if not arg.get('is_type_dispatched')]
+        declaration['type_method_args'] = [arg['name'] for arg in declaration['arguments']
+                                           if not arg.get('is_type_dispatched')]
         declaration['api_name'] = declaration['name']
         declaration['return_type'] = format_return_type(declaration['returns'])
 

@@ -1,4 +1,4 @@
-"""
+r"""
 The torch package contains data structures for multi-dimensional
 tensors and mathematical operations over these are defined.
 Additionally, it provides many utilities for efficient serializing of
@@ -12,6 +12,7 @@ import sys
 import platform
 from ._utils import _import_dotted_name
 from .version import __version__
+from ._six import string_classes as _string_classes
 
 __all__ = [
     'typename', 'is_tensor', 'is_storage', 'set_default_tensor_type',
@@ -21,7 +22,7 @@ __all__ = [
     'DoubleStorage', 'FloatStorage', 'LongStorage', 'IntStorage',
     'ShortStorage', 'CharStorage', 'ByteStorage',
     'DoubleTensor', 'FloatTensor', 'LongTensor', 'IntTensor',
-    'ShortTensor', 'CharTensor', 'ByteTensor',
+    'ShortTensor', 'CharTensor', 'ByteTensor', 'Tensor',
 ]
 
 ################################################################################
@@ -110,7 +111,7 @@ def typename(o):
 
 
 def is_tensor(obj):
-    r"""Returns True if `obj` is a pytorch tensor.
+    r"""Returns True if `obj` is a PyTorch tensor.
 
     Args:
         obj (Object): Object to test
@@ -119,7 +120,7 @@ def is_tensor(obj):
 
 
 def is_storage(obj):
-    r"""Returns True if `obj` is a pytorch storage object.
+    r"""Returns True if `obj` is a PyTorch storage object.
 
     Args:
         obj (Object): Object to test
@@ -128,12 +129,49 @@ def is_storage(obj):
 
 
 def set_default_tensor_type(t):
-    if isinstance(t, globals()['dtype']):
-        _C._set_default_tensor_type(t)
-    else:
-        Tensor = _import_dotted_name(t)
-        _C._set_default_tensor_type(Tensor)
+    r"""Sets the default ``torch.Tensor`` type to floating point tensor type
+    :attr:`t`. This type will also be used as default floating point type for
+    type inference in :func:`torch.tensor`.
 
+    The default floating point tensor type is initially ``torch.FloatTensor``.
+
+    Args:
+        t (type or string): the floating point tensor type or its name
+
+    Example::
+
+        >>> torch.tensor([1.2, 3]).dtype    # initial default for floating point is torch.float32
+        torch.float32
+        >>> torch.set_default_tensor_type(torch.DoubleTensor)
+        >>> torch.tensor([1.2, 3]).dtype    # a new floating point tensor
+        torch.float64
+
+    """
+    if isinstance(t, _string_classes):
+        t = _import_dotted_name(t)
+    _C._set_default_tensor_type(t)
+
+
+def set_default_dtype(d):
+    r"""Sets the default floating point dtype to :attr:`d`. This type will be
+    used as default floating point type for type inference in
+    :func:`torch.tensor`.
+
+    The default floating point dtype is initially ``torch.float32``.
+
+    Args:
+        d (:class:`torch.dtype`): the floating point dtype to make the default
+
+    Example::
+
+        >>> torch.tensor([1.2, 3]).dtype           # initial default for floating point is torch.float32
+        torch.float32
+        >>> torch.set_default_dtype(torch.float64)
+        >>> torch.tensor([1.2, 3]).dtype           # a new floating point tensor
+        torch.float64
+
+    """
+    _C._set_default_dtype(d)
 
 from .random import set_rng_state, get_rng_state, manual_seed, initial_seed
 from .serialization import save, load
@@ -143,6 +181,7 @@ from ._tensor_str import set_printoptions
 # Define Storage and Tensor classes
 ################################################################################
 
+from .tensor import Tensor
 from .storage import _StorageBase
 
 
@@ -188,13 +227,6 @@ _tensor_classes = set()
 
 
 ################################################################################
-# Import interface functions defined in Python
-################################################################################
-
-from .functional import *
-
-
-################################################################################
 # Initialize extension
 ################################################################################
 
@@ -214,6 +246,13 @@ del manager_path
 
 for name in dir(_C._VariableFunctions):
     globals()[name] = getattr(_C._VariableFunctions, name)
+
+################################################################################
+# Import interface functions defined in Python
+################################################################################
+
+# needs to be after the above ATen bindings so we can overwrite from Python side
+from .functional import *
 
 
 ################################################################################
@@ -240,10 +279,12 @@ import torch.multiprocessing
 import torch.sparse
 import torch.utils.backcompat
 import torch.onnx
+import torch.jit
 import torch.random
 import torch.distributions
 import torch.testing
-from torch.autograd import no_grad, enable_grad
+import torch.backends.mkl
+from torch.autograd import no_grad, enable_grad, set_grad_enabled
 
 _C._init_names(list(torch._storage_classes))
 

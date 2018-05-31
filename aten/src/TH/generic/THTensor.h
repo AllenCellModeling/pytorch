@@ -6,21 +6,8 @@
 
 #define TH_TENSOR_REFCOUNTED 1
 
-typedef struct THTensor
-{
-    int64_t *size;
-    int64_t *stride;
-    int nDimension;
-
-    // Note: storage->size may be greater than the recorded size
-    // of a tensor
-    THStorage *storage;
-    ptrdiff_t storageOffset;
-    int refcount;
-
-    char flag;
-
-} THTensor;
+// Struct definition moved to THTensor.hpp
+typedef struct THTensor THTensor;
 
 
 /**** access methods ****/
@@ -71,10 +58,6 @@ TH_API THTensor *THTensor_(newNarrow)(THTensor *tensor, int dimension_, int64_t 
 TH_API THTensor *THTensor_(newTranspose)(THTensor *tensor, int dimension1_, int dimension2_);
 TH_API THTensor *THTensor_(newUnfold)(THTensor *tensor, int dimension_, int64_t size_, int64_t step_);
 TH_API THTensor *THTensor_(newView)(THTensor *tensor, THLongStorage *size);
-TH_API THTensor *THTensor_(newExpand)(THTensor *tensor, THLongStorage *size);
-
-TH_API void THTensor_(expand)(THTensor *r, THTensor *tensor, THLongStorage *size);
-TH_API void THTensor_(expandNd)(THTensor **rets, THTensor **ops, int count);
 
 // resize* methods simply resize the storage. So they may not retain the current data at current indices.
 // This is especially likely to happen when the tensor is not contiguous. In general, if you still need the

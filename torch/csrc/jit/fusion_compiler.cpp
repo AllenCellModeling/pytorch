@@ -4,8 +4,11 @@
 #include "torch/csrc/jit/code_template.h"
 #include "torch/csrc/jit/resource_guard.h"
 #include "torch/csrc/utils/disallow_copy.h"
+#include "torch/csrc/variable_tensor_functions.h"
+
 #include "ATen/ATen.h"
 #ifdef WITH_CUDA
+#include "THC/THC.h"
 #include "torch/csrc/cuda/cuda_check.h"
 #include <nvrtc.h>
 #include <cuda.h>
@@ -22,72 +25,6 @@
 
 namespace torch { namespace jit {
 
-std::unordered_map<NodeKind, std::string> simple_map_ops = {
-  // unary
-  {kabs, "absf(${0})"},
-  {ksigmoid, "1.f / (1.f + expf(-${0}))"},
-  {klog, "logf(${0})"},
-  {klog1p, "log1pf(${0})"},
-  {klgamma, "lgammaf(${0})"},
-  {kexp, "expf(${0})"},
-  {kexpm1, "expm1f(${0})"},
-  {kcos, "cosf(${0})"},
-  {kacos, "acosf(${0})"},
-  {kcosh, "coshf(${0})"},
-  {ksin, "sinf(${0})"},
-  {kasin, "asinf(${0})"},
-  {ksinh, "sinhf(${0})"},
-  {ktan, "tanf(${0})"},
-  {katan, "atanf(${0})"},
-  {ktanh, "tanhf(${0})"},
-  {ksqrt, "sqrtf(${0})"},
-  {krsqrt, "rsqrtf(${0})"},
-  {kceil, "ceilf(${0})"},
-  {kfloor, "floorf(${0})"},
-  {kround, "roundf(${0})"},
-  {ktrunc, "truncf(${0})"},
-  {kfrac, "fracf(${0})"},
-  {kreciprocal, "reciprocalf(${0})"},
-  {kneg, "-${0}"},
-  //simple binary
-  {katan2, "atan2(${0}, ${1})"},
-  {kmin, "fminf(${0}, ${1})"},
-  {kmax, "fmaxf(${0}, ${1})"},
-
-  //binary with other
-  // TODO: some of these ops will not get generated because
-  // we only work on float inputs/outputs, but they are here to record
-  // that they are valid mappable ops once we handle more type
-  {k__and__, "${0} && ${1}"},
-  {k__lshift__, "${0} << ${1}"},
-  {k__or__, "${0} || ${1}"},
-  {k__rshift__, "${0} >> ${1}"},
-  {k__xor__, "${0} ^ ${1}"},
-  {kdiv, "${0} / ${1}"},
-  {keq, "${0} == ${1}"},
-  {kfmod, "fmodf(${0}, ${1})"},
-  {kge, "${0} >= ${1})"},
-  {kgt, "${0} > ${1}"},
-  {kle, "${0} <= ${1})"},
-  {klt, "${0} < ${1}"},
-  {kmul, "${0} * ${1}"},
-  {kne, "${0} != ${1}"},
-  {kremainder, "remainderf(${0}, ${1})"},
-  {kpow, "powf(${0}, ${1})"},
-
-  //alpha
-  {kadd, "${0} + ${alpha}*${1}"},
-  {ksub, "(${0} - ${alpha}*${1})"},
-
-  // special
-  {klerp, "${0} + ${weight}*(${1} - ${0})"},
-  {kclamp, "min(max(${0},${min}),${max})"},
-
-  // simple derivatives
-  {"_sigmoid_backward"_sym, "${0} * ${1} * (1.f - ${1})"},
-  {"_tanh_backward"_sym,    "${0} * (1.f - ${1} * ${1})"},
-};
-
 std::vector<bool> TensorDesc::findContiguous(
     const at::IntList& sizes,
     const at::IntList& strides) {
@@ -102,9 +39,13 @@ std::vector<bool> TensorDesc::findContiguous(
 
 namespace {
 
+#ifdef WITH_CUDA
+
 static int ceilDiv(int a, int b) {
   return (a + b - 1) / b;
 }
+
+#endif
 
 std::ostream& operator<<(std::ostream & out, const TensorDesc & d) {
   out << d.scalar_type << "[";
@@ -219,6 +160,75 @@ const char * scalarTypeName(at::ScalarType type) {
 }
 
 std::string encodeRHS(Node * n) {
+  static std::unordered_map<NodeKind, std::string> simple_map_ops = {
+    // unary
+    {aten::abs, "absf(${0})"},
+    {aten::sigmoid, "1.f / (1.f + expf(-${0}))"},
+    {aten::log, "logf(${0})"},
+    {aten::log10, "log10f(${0})"},
+    {aten::log1p, "log1pf(${0})"},
+    {aten::log2,  "log2f(${0})"},
+    {aten::lgamma, "lgammaf(${0})"},
+    {aten::exp, "expf(${0})"},
+    {aten::expm1, "expm1f(${0})"},
+    {aten::cos, "cosf(${0})"},
+    {aten::acos, "acosf(${0})"},
+    {aten::cosh, "coshf(${0})"},
+    {aten::sin, "sinf(${0})"},
+    {aten::asin, "asinf(${0})"},
+    {aten::sinh, "sinhf(${0})"},
+    {aten::tan, "tanf(${0})"},
+    {aten::atan, "atanf(${0})"},
+    {aten::tanh, "tanhf(${0})"},
+    {aten::sqrt, "sqrtf(${0})"},
+    {aten::rsqrt, "rsqrtf(${0})"},
+    {aten::ceil, "ceilf(${0})"},
+    {aten::floor, "floorf(${0})"},
+    {aten::round, "roundf(${0})"},
+    {aten::trunc, "truncf(${0})"},
+    {aten::frac, "fracf(${0})"},
+    {aten::reciprocal, "reciprocalf(${0})"},
+    {aten::neg, "-${0}"},
+    //simple binary
+    {aten::atan2, "atan2(${0}, ${1})"},
+    {aten::min, "fminf(${0}, ${1})"},
+    {aten::max, "fmaxf(${0}, ${1})"},
+
+    //binary with other
+    // TODO: some of these ops will not get generated because
+    // we only work on float inputs/outputs, but they are here to record
+    // that they are valid mappable ops once we handle more type
+    {aten::__and__, "${0} && ${1}"},
+    {aten::__lshift__, "${0} << ${1}"},
+    {aten::__or__, "${0} || ${1}"},
+    {aten::__rshift__, "${0} >> ${1}"},
+    {aten::__xor__, "${0} ^ ${1}"},
+    {aten::div, "${0} / ${1}"},
+    {aten::eq, "${0} == ${1}"},
+    {aten::fmod, "fmodf(${0}, ${1})"},
+    {aten::ge, "${0} >= ${1})"},
+    {aten::gt, "${0} > ${1}"},
+    {aten::le, "${0} <= ${1})"},
+    {aten::lt, "${0} < ${1}"},
+    {aten::mul, "${0} * ${1}"},
+    {aten::ne, "${0} != ${1}"},
+    {aten::remainder, "remainderf(${0}, ${1})"},
+    {aten::pow, "powf(${0}, ${1})"},
+
+    //alpha
+    {aten::add, "${0} + ${alpha}*${1}"},
+    {aten::sub, "(${0} - ${alpha}*${1})"},
+
+    // special
+    {aten::lerp, "${0} + ${weight}*(${1} - ${0})"},
+    {aten::clamp, "min(max(${0},${min}),${max})"},
+
+    // simple derivatives
+    {aten::_sigmoid_backward, "${0} * ${1} * (1.f - ${1})"},
+    {aten::_tanh_backward,    "${0} * (1.f - ${1} * ${1})"},
+  };
+
+
   TemplateEnv env;
   size_t i = 0;
   for(auto in : n->inputs()) {
@@ -227,15 +237,16 @@ std::string encodeRHS(Node * n) {
   // ops like div have a / b or a / 2 with the constant having the attribute other
   // so we add other as an input if it is present
   // 'pow' is the same but uses exponent as the attribute, so we handle that here as well
-  if(n->hasAttribute(kother) || n->hasAttribute(kexponent)) {
-    env.s(std::to_string(i), scalarValue(n->t(kother)));
+  if(n->hasAttribute(attr::other) || n->hasAttribute(attr::exponent)) {
+    env.s(std::to_string(i), scalarValue(n->t(attr::other)));
   }
   // we also add any other scalar tensors to the env for special ops
   for(auto a : n->attributeNames()) {
     if(n->kindOf(a) == AttributeKind::t) {
       auto v = n->t(a);
       if(v.dim() == 0) {
-        env.s(a.toString(), scalarValue(v));
+        JIT_ASSERT(a.is_attr());
+        env.s(a.toUnqualString(), scalarValue(v));
       }
     }
   }
@@ -279,14 +290,14 @@ std::vector<ConcatDesc> emitCompilationUnit(std::ostream & out,
     size_t i = 0;
     for(auto o : subgraph.outputs()) {
       auto & desc = agraph.output_desc[i++];
-      if(o->node()->kind() != kcat) {
+      if(o->node()->kind() != aten::cat) {
         emitFormal(o, desc);
         concat_desc.emplace_back();
         flat_output_nodes.push_back(o);
       } else {
         auto cat = o->node();
         size_t nInputs = cat->inputs().size();
-        concat_desc.emplace_back(desc, nInputs, cat->i(kdim));
+        concat_desc.emplace_back(desc, nInputs, cat->i(attr::dim));
         for(auto c : cat->inputs()) {
           emitFormal(c, *concat_desc.back().subtensorDesc);
           flat_output_nodes.push_back(c);
@@ -303,7 +314,7 @@ std::vector<ConcatDesc> emitCompilationUnit(std::ostream & out,
     body << format("auto ${node} = ${access};\n",env);
   }
   for(auto n : subgraph.nodes()) {
-    if(n->kind() == kcat)
+    if(n->kind() == aten::cat)
       continue; // Concat nodes by narrowing the output Tensors before the kernel runs
     env.s("node",valueName(n->output()));
     env.s("rhs", encodeRHS(n));
@@ -337,7 +348,9 @@ std::vector<ConcatDesc> emitCompilationUnit(std::ostream & out,
 // Note dims[0] - we need to dynamically allocate the dims.
 struct TensorInfo {
   void * data;
+#pragma GCC diagnostic ignored "-Wpedantic"
   uint32_t sizes_strides[0];
+#pragma GCC diagnostic pop
 
   uint32_t* sizes(size_t nDim) { return &sizes_strides[0]; }
   uint32_t* strides(size_t nDim) { return &sizes_strides[nDim]; }
@@ -463,7 +476,7 @@ void CompiledFusionFunction::launch(at::ArrayRef<at::Tensor> inputs, std::vector
   outputs.clear();
   outputs.reserve(outputDescriptors().size());
   for(auto & od : outputDescriptors()) {
-    outputs.push_back(at::getType(backend(),od.scalar_type).tensor());
+    outputs.push_back(torch::getType(backend(),od.scalar_type).tensor());
   }
   launch_with_tensors(inputs, outputs);
 }
@@ -538,13 +551,19 @@ protected:
      // it is possible that this is the first cuda call on this thread
      // so make sure we initialize the Driver API's context
      // cudaFree(0) accomplishes this.
-     cudaFree(0);
-
+     CUcontext pctx = 0;
+     TORCH_CU_CHECK(cuCtxGetCurrent(&pctx));
+     if (!pctx) {
+        std::unique_lock<std::mutex> cudaFreeMutexLock(
+            *(THCCachingAllocator_getCudaFreeMutex()));
+        cudaFree(0);
+     }
+     CUstream stream = at::globalContext().getCurrentCUDAStream();
      TORCH_CU_CHECK(cuLaunchKernel(
        function,
        numBlocks, 1, 1,
        blockSize, 1, 1,
-       0, nullptr,
+       0, stream,
        arguments,
        nullptr));
   }
@@ -657,7 +676,7 @@ static void runCompiler(FusionCompilerConfig & config, const std::string & cpp_f
     config.openmp = false; // disable for future compiles
     return runCompiler(config, cpp_file, so_file);
   }
-  JIT_ASSERT(r == 0);
+  JIT_ASSERTM(r == 0, "Failed to compile a fused CPU kernel");
 }
 
 
@@ -684,11 +703,12 @@ struct CPUFusionFunction : public CompiledFusionFunction {
     cpp_file.sync();
     runCompiler(config, cpp_file.name(), so_file.name());
     if(config.debug) {
-      std::cout << compilation_unit << "\n";
       disas(so_file.name());
     }
     so_lib.reset(new DynamicLibrary(so_file.name().c_str()));
+#pragma GCC diagnostic ignored "-Wpedantic"
     kernel = reinterpret_cast<void(*)(uint32_t, void**)>(so_lib->sym(name.c_str()));
+#pragma GCC diagnostic pop
   }
 protected:
   virtual at::Backend backend() const override {
@@ -731,8 +751,8 @@ std::shared_ptr<CompiledFusionFunction> FusionCompiler::getOrCompile(AnnotatedGr
 }
 
 std::shared_ptr<CompiledFusionFunction> FusionCompiler::getOrCompile(Node* fusion_group) {
-  auto & graph = *fusion_group->g(kSubgraph);
-  AnnotatedGraph agraph(graph, fusion_group->i(kdevice));
+  auto & graph = *fusion_group->g(attr::Subgraph);
+  AnnotatedGraph agraph(graph, fusion_group->i(attr::device));
   for(auto & input : graph.inputs()) {
     auto t = input->type()->expect<TensorType>();
     agraph.input_desc.emplace_back(t);

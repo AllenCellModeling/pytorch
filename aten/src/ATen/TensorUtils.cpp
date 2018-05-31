@@ -127,6 +127,18 @@ void checkAllSameNumel(CheckedFrom c, ArrayRef<TensorArg> tensors) {
 }
 
 void checkSameGPU(CheckedFrom c, const TensorArg& t1, const TensorArg& t2) {
+  if (! (t1->is_cuda()) || ! (t2->is_cuda())) {
+    std::ostringstream oss;
+    if (! t1->is_cuda()) {
+      oss << "Tensor for " << t1 << " is on CPU, ";
+    }
+    if (! t2->is_cuda()) {
+      oss << "Tensor for " << t2 << " is on CPU, ";
+    }
+    oss << "but expected " << ((!(t1->is_cuda() || t2->is_cuda())) ? "them" : "it")
+	<< " to be on GPU (while checking arguments for " << c << ")";
+    throw std::runtime_error(oss.str());
+  }
   if (t1->get_device() != t2->get_device()) {
     std::ostringstream oss;
     oss << "Expected tensor for " << t1 << " to have the same device as "
@@ -160,6 +172,26 @@ void checkScalarType(CheckedFrom c, const TensorArg& t, ScalarType ty) {
         << " instead (while checking arguments for " << c << ")";
     throw std::runtime_error(oss.str());
   }
+}
+
+void checkScalarTypes(CheckedFrom c, const TensorArg& t,
+                      at::ArrayRef<ScalarType> l) {
+    if (std::find(l.begin(), l.end(), t->type().scalarType()) == l.end()) {
+      std::ostringstream oss;
+      oss << "Expected tensor for " << t << " to have one of the following "
+          << "scalar types: ";
+      size_t i = 0;
+      for (auto ty : l) {
+        if (i != 0) {
+          oss << ", ";
+        }
+        oss << toString(ty);
+        i++;
+      }
+      oss << "; but got " << t->toString()
+          << " instead (while checking arguments for " << c << ")";
+      throw std::runtime_error(oss.str());
+    }
 }
 
 void checkAllSameType(CheckedFrom c, ArrayRef<TensorArg> tensors) {
@@ -197,7 +229,7 @@ void checkAllDefined(CheckedFrom c, ArrayRef<TensorArg> ts) {
 void checkBackend(CheckedFrom c, const Tensor& t, Backend backend) {
   if (t.type().backend() != backend) {
     std::ostringstream oss;
-    oss << "Expected tensor to have " << toString(t.type().backend()) << " Backend, but got tensor with "
+    oss << "Expected tensor to have " << toString(backend) << " Backend, but got tensor with "
         << toString(t.type().backend()) << " Backend "
         << "(while checking arguments for " << c << ")";
     throw std::runtime_error(oss.str());

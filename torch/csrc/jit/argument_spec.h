@@ -1,4 +1,5 @@
-#include <Python.h>
+#pragma once
+
 #include <iostream>
 #include <vector>
 #include "torch/csrc/autograd/variable.h"
@@ -179,6 +180,7 @@ inline std::ostream& operator<<(std::ostream & out, const ArgumentSpec & spec) {
       out << ", ";
     out << spec.tensorInfo(i);
   }
+  out << "}";
   return out;
 }
 
@@ -195,4 +197,4 @@ namespace std {
       return spec.hashCode();
     }
   };
-};
+}

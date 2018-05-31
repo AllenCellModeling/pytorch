@@ -1,6 +1,17 @@
+r"""Importing this file must **not** initialize CUDA context. test_distributed
+relies on this assumption to properly run. This means that when this is imported
+no CUDA calls shall be made, including torch.cuda.device_count(), etc.
+
+common_cuda.py can freely initialize CUDA context when imported.
+"""
+
 import sys
 import os
+import platform
 import re
+import gc
+import types
+import inspect
 import argparse
 import unittest
 import warnings
@@ -16,9 +27,9 @@ import errno
 
 import torch
 import torch.cuda
-from torch.autograd import Variable
 from torch._six import string_classes
 import torch.backends.cudnn
+import torch.backends.mkl
 
 
 torch.set_default_tensor_type('torch.DoubleTensor')
@@ -39,8 +50,10 @@ def run_tests():
     unittest.main(argv=UNITTEST_ARGS)
 
 PY3 = sys.version_info > (3, 0)
+PY34 = sys.version_info >= (3, 4)
 
 IS_WINDOWS = sys.platform == "win32"
+IS_PPC = platform.machine() == "ppc64le"
 
 TEST_NUMPY = True
 try:
@@ -53,6 +66,8 @@ try:
     import scipy
 except ImportError:
     TEST_SCIPY = False
+
+TEST_MKL = torch.backends.mkl.is_available()
 
 
 def skipIfNoLapack(fn):
@@ -67,7 +82,21 @@ def skipIfNoLapack(fn):
     return wrapper
 
 
+def skipCUDAMemoryLeakCheck(fn):
+    fn._do_cuda_memory_leak_check = False
+    return fn
+
+
+def get_cuda_memory_usage():
+    # we don't need CUDA synchronize because the statistics are not tracked at
+    # actual freeing, but at when marking the block as free.
+    num_devices = torch.cuda.device_count()
+    gc.collect()
+    return tuple(torch.cuda.memory_allocated(i) for i in range(num_devices))
+
+
 def suppress_warnings(fn):
+    @wraps(fn)
     def wrapper(*args, **kwargs):
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
@@ -107,6 +136,10 @@ def to_gpu(obj, type_map={}):
         return deepcopy(obj)
 
 
+def get_function_arglist(func):
+    return inspect.getargspec(func).args
+
+
 def set_rng_seed(seed):
     torch.manual_seed(seed)
     random.seed(seed)
@@ -144,6 +177,41 @@ def is_iterable(obj):
 class TestCase(unittest.TestCase):
     precision = 1e-5
     maxDiff = None
+    _do_cuda_memory_leak_check = False
+
+    def __init__(self, method_name='runTest'):
+        super(TestCase, self).__init__(method_name)
+        # Wraps the tested method if we should do CUDA memory check.
+        test_method = getattr(self, method_name)
+        self._do_cuda_memory_leak_check &= getattr(test_method, '_do_cuda_memory_leak_check', True)
+        if self._do_cuda_memory_leak_check:
+            # the import below may initialize CUDA context, so we do it only if
+            # self._do_cuda_memory_leak_check is True.
+            from common_cuda import TEST_CUDA
+            fullname = self.id().lower()  # class_name.method_name
+            if TEST_CUDA and ('gpu' in fullname or 'cuda' in fullname):
+                # initialize context & RNG to prevent false positive detections
+                # when the test is the first to initialize those
+                from common_cuda import initialize_cuda_context_rng
+                initialize_cuda_context_rng()
+                setattr(self, method_name, self.wrap_with_cuda_memory_check(test_method))
+
+    def wrap_with_cuda_memory_check(self, method):
+        # Assumes that `method` is the tested function in `self`.
+        # NOTE: Python Exceptions (e.g., unittest.Skip) keeps objects in scope
+        #       alive, so this cannot be done in setUp and tearDown because
+        #       tearDown is run unconditionally no matter whether the test
+        #       passes or not. For the same reason, we can't wrap the `method`
+        #       call in try-finally and always do the check.
+        @wraps(method)
+        def wrapper(self, *args, **kwargs):
+            befores = get_cuda_memory_usage()
+            method(*args, **kwargs)
+            afters = get_cuda_memory_usage()
+            for i, (before, after) in enumerate(zip(befores, afters)):
+                self.assertEqual(before, after, '{} leaked {} bytes CUDA memory on device {}'.format(
+                                 self.id(), after - before, i))
+        return types.MethodType(wrapper, self)
 
     def setUp(self):
         set_rng_seed(SEED)
@@ -177,7 +245,7 @@ class TestCase(unittest.TestCase):
             if idx_tup in value_map:
                 value_map[idx_tup] += val
             else:
-                value_map[idx_tup] = val.clone() if torch.is_tensor(val) else val
+                value_map[idx_tup] = val.clone() if isinstance(val, torch.Tensor) else val
 
         new_indices = sorted(list(value_map.keys()))
         new_values = [value_map[idx] for idx in new_indices]
@@ -198,13 +266,6 @@ class TestCase(unittest.TestCase):
 
         return tg
 
-    def unwrapVariables(self, x, y):
-        if isinstance(x, Variable):
-            x = x.data
-        if isinstance(y, Variable):
-            y = y.data
-        return x, y
-
     def assertEqual(self, x, y, prec=None, message='', allow_inf=False):
         if isinstance(prec, str) and message == '':
             message = prec
@@ -212,13 +273,11 @@ class TestCase(unittest.TestCase):
         if prec is None:
             prec = self.precision
 
-        x, y = self.unwrapVariables(x, y)
-
         if isinstance(x, torch.Tensor) and isinstance(y, Number):
             self.assertEqual(x.item(), y, prec, message, allow_inf)
         elif isinstance(y, torch.Tensor) and isinstance(x, Number):
             self.assertEqual(x, y.item(), prec, message, allow_inf)
-        elif torch.is_tensor(x) and torch.is_tensor(y):
+        elif isinstance(x, torch.Tensor) and isinstance(y, torch.Tensor):
             def assertTensorsEqual(a, b):
                 super(TestCase, self).assertEqual(a.size(), b.size(), message)
                 if a.numel() > 0:
@@ -276,9 +335,7 @@ class TestCase(unittest.TestCase):
         if prec is None:
             prec = self.precision
 
-        x, y = self.unwrapVariables(x, y)
-
-        if torch.is_tensor(x) and torch.is_tensor(y):
+        if isinstance(x, torch.Tensor) and isinstance(y, torch.Tensor):
             if x.size() != y.size():
                 super(TestCase, self).assertNotEqual(x.size(), y.size())
             self.assertGreater(x.numel(), 0)
@@ -326,8 +383,29 @@ class TestCase(unittest.TestCase):
         # Don't put this in the try block; the AssertionError will catch it
         self.fail(msg="Did not raise when expected to")
 
-    def assertExpected(self, s, subname=None):
+    def assertWarns(self, callable, msg=''):
+        r"""
+        Test if :attr:`callable` raises a warning.
         """
+        with warnings.catch_warnings(record=True) as ws:
+            warnings.simplefilter("always")  # allow any warning to be raised
+            callable()
+            self.assertTrue(len(ws) > 0, msg)
+
+    def assertWarnsRegex(self, callable, regex, msg=''):
+        r"""
+        Test if :attr:`callable` raises any warning with message that contains
+        the regex pattern :attr:`regex`.
+        """
+        with warnings.catch_warnings(record=True) as ws:
+            warnings.simplefilter("always")  # allow any warning to be raised
+            callable()
+            self.assertTrue(len(ws) > 0, msg)
+            found = any(re.search(regex, str(w.message)) is not None for w in ws)
+            self.assertTrue(found, msg)
+
+    def assertExpected(self, s, subname=None):
+        r"""
         Test that a string matches the recorded contents of a file
         derived from the name of this test and subname.  This file
         is placed in the 'expect' directory in the same directory
@@ -396,9 +474,9 @@ class TestCase(unittest.TestCase):
                 self.assertEqual(s, expected)
 
     if sys.version_info < (3, 2):
-        # assertRegexpMatches renamed assertRegex in 3.2
+        # assertRegexpMatches renamed to assertRegex in 3.2
         assertRegex = unittest.TestCase.assertRegexpMatches
-        # assertRaisesRegexp renamed assertRaisesRegex in 3.2
+        # assertRaisesRegexp renamed to assertRaisesRegex in 3.2
         assertRaisesRegex = unittest.TestCase.assertRaisesRegexp
 
 

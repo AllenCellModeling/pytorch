@@ -1,6 +1,7 @@
 import warnings
 from collections import OrderedDict, Iterable
 from itertools import islice
+import operator
 
 import torch
 from .module import Module
@@ -53,6 +54,7 @@ class Sequential(Module):
     def _get_item_by_idx(self, iterator, idx):
         """Get the idx-th item of the iterator"""
         size = len(self)
+        idx = operator.index(idx)
         if not -size <= idx < size:
             raise IndexError('index {} is out of range'.format(idx))
         idx %= size
@@ -120,6 +122,7 @@ class ModuleList(Module):
 
     def _get_abs_string_index(self, idx):
         """Get the absolute index for the list of modules"""
+        idx = operator.index(idx)
         if not (-len(self) <= idx < len(self)):
             raise IndexError('index {} is out of range'.format(idx))
         if idx < 0:
@@ -133,6 +136,7 @@ class ModuleList(Module):
             return self._modules[self._get_abs_string_index(idx)]
 
     def __setitem__(self, idx, module):
+        idx = operator.index(idx)
         return setattr(self, str(idx), module)
 
     def __delitem__(self, idx):
@@ -215,6 +219,7 @@ class ParameterList(Module):
         if isinstance(idx, slice):
             return ParameterList(list(self._parameters.values())[idx])
         else:
+            idx = operator.index(idx)
             if not (-len(self) <= idx < len(self)):
                 raise IndexError('index {} is out of range'.format(idx))
             if idx < 0:
@@ -222,6 +227,7 @@ class ParameterList(Module):
             return self._parameters[str(idx)]
 
     def __setitem__(self, idx, param):
+        idx = operator.index(idx)
         return self.register_parameter(str(idx), param)
 
     def __len__(self):
@@ -261,13 +267,12 @@ class ParameterList(Module):
             self.register_parameter(str(offset + i), param)
         return self
 
-    def __repr__(self):
-        tmpstr = self.__class__.__name__ + '(\n'
+    def extra_repr(self):
+        tmpstr = ''
         for k, p in self._parameters.items():
             size_str = 'x'.join(str(size) for size in p.size())
             device_str = '' if not p.is_cuda else ' (GPU {})'.format(p.get_device())
             parastr = 'Parameter containing: [{} of size {}{}]'.format(
                 torch.typename(p.data), size_str, device_str)
             tmpstr = tmpstr + '  (' + k + '): ' + parastr + '\n'
-        tmpstr = tmpstr + ')'
         return tmpstr

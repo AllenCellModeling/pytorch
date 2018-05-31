@@ -2,6 +2,8 @@
 #define TH_GENERIC_FILE "generic/THTensor.cpp"
 #else
 
+#include <new>
+
 /**** access methods ****/
 THStorage *THTensor_(storage)(const THTensor *self)
 {
@@ -49,7 +51,7 @@ THLongStorage *THTensor_(newStrideOf)(THTensor *self)
 real *THTensor_(data)(const THTensor *self)
 {
   if(self->storage)
-    return (self->storage->data+self->storageOffset);
+    return (THStorage_(data)(self->storage)+self->storageOffset);
   else
     return NULL;
 }
@@ -106,8 +108,8 @@ THTensor *THTensor_(newWithStorage)(THStorage *storage, ptrdiff_t storageOffset,
                           storage,
                           storageOffset,
                           (size ? size->size : (stride ? stride->size : 0)),
-                          (size ? size->data : NULL),
-                          (stride ? stride->data : NULL));
+                          (size ? THLongStorage_data(size) : NULL),
+                          (stride ? THLongStorage_data(stride) : NULL));
 
   return self;
 }
@@ -250,9 +252,9 @@ static int THTensor_(isViewable)(THTensor *tensor, THLongStorage *view_size, THL
     // if end of tensor size chunk, check view
     if ((tensor_d == 0) ||
         (tensor->size[tensor_d - 1] != 1 && tensor->stride[tensor_d - 1] != tensor_numel * chunk_base_stride)) {
-      while (view_d >= 0 && (view_numel < tensor_numel || view_size->data[view_d] == 1)) {
-        new_stride->data[view_d] = view_numel * chunk_base_stride;
-        view_numel *= view_size->data[view_d];
+      while (view_d >= 0 && (view_numel < tensor_numel || THLongStorage_data(view_size)[view_d] == 1)) {
+        THLongStorage_data(new_stride)[view_d] = view_numel * chunk_base_stride;
+        view_numel *= THLongStorage_data(view_size)[view_d];
         view_d--;
       }
       if (view_numel != tensor_numel) {
@@ -294,7 +296,7 @@ void THTensor_(resize)(THTensor *self, THLongStorage *size, THLongStorage *strid
 #ifdef DEBUG
   THAssert(size->size <= INT_MAX);
 #endif
-  THTensor_(resizeNd)(self, size->size, size->data, (stride ? stride->data : NULL));
+  THTensor_(resizeNd)(self, size->size, THLongStorage_data(size), (stride ? THLongStorage_data(stride) : NULL));
 }
 
 void THTensor_(resizeAs)(THTensor *self, THTensor *src)
@@ -332,77 +334,6 @@ void THTensor_(resize5d)(THTensor *self, int64_t size0, int64_t size1, int64_t s
   THTensor_(resizeNd)(self, 5, size, NULL);
 }
 
-THTensor* THTensor_(newExpand)(THTensor *tensor, THLongStorage *sizes) {
-  THTensor *result = THTensor_(new)();
-  THTensor_(expand)(result, tensor, sizes);
-  return result;
-}
-
-void THTensor_(expand)(THTensor *r, THTensor *tensor, THLongStorage *sizes) {
-  THArgCheck(THTensor_(nDimension)(tensor) > 0 || THLongStorage_size(sizes) == 0, 0,
-             "can't expand an empty tensor");
-  THArgCheck(THLongStorage_size(sizes) >= THTensor_(nDimension)(tensor), 1,
-             "the number of sizes provided must be greater or equal to the "
-             "number of dimensions in the tensor");
-
-  int64_t *expandedSizes;
-  int64_t *expandedStrides;
-  char error_buffer[1024];
-  int ret =
-      THLongStorage_inferExpandGeometry(tensor->size, tensor->stride, THTensor_(nDimension)(tensor),
-                                        sizes, &expandedSizes, &expandedStrides, error_buffer, 1024);
-
-  if (ret != 0) {
-    THError(error_buffer);
-    return;
-  }
-
-  THTensor_(setStorageNd)(r, THTensor_(storage)(tensor), THTensor_(storageOffset)(tensor),
-                          THLongStorage_size(sizes), expandedSizes, expandedStrides);
-  THFree(expandedSizes);
-  THFree(expandedStrides);
-}
-
-
-void THTensor_(expandNd)(THTensor **rets, THTensor **ops, int count) {
-  for (int i = 0; i < count; ++i) {
-    THArgCheck(THTensor_(nDimension)(ops[i]) > 0, i, "can't expand empty tensor %d", i);
-  }
-
-  int64_t **op_sizes = (int64_t **)THAlloc(sizeof(int64_t*) * count);
-  int64_t *op_dims = (int64_t *)THAlloc(sizeof(int64_t) * count);
-
-  for (int i = 0; i < count; ++i) {
-    op_sizes[i] = ops[i]->size;
-    op_dims[i] = ops[i]->nDimension;
-  }
-
-  THLongStorage *sizes = THLongStorage_new();
-  char error_buffer[1024];
-  int ret = THLongStorage_inferSizeN(sizes,
-                                     count,
-                                     op_sizes,
-                                     op_dims,
-                                     error_buffer,
-                                     1024);
-
-  if(ret != 0) {
-    THFree(op_sizes);
-    THFree(op_dims);
-    THLongStorage_free(sizes);
-    THError(error_buffer);
-    return;
-  }
-
-  for (int i = 0; i < count; ++i) {
-    THTensor_(expand)(rets[i], ops[i], sizes);
-  }
-
-  THFree(op_sizes);
-  THFree(op_dims);
-  THLongStorage_free(sizes);
-}
-
 void THTensor_(set)(THTensor *self, THTensor *src)
 {
   if(self != src)
@@ -426,8 +357,8 @@ void THTensor_(setStorage)(THTensor *self, THStorage *storage_, ptrdiff_t storag
                           storage_,
                           storageOffset_,
                           (size_ ? size_->size : (stride_ ? stride_->size : 0)),
-                          (size_ ? size_->data : NULL),
-                          (stride_ ? stride_->data : NULL));
+                          (size_ ? THLongStorage_data(size_) : NULL),
+                          (stride_ ? THLongStorage_data(stride_) : NULL));
 }
 
 void THTensor_(setStorage1d)(THTensor *self, THStorage *storage_, ptrdiff_t storageOffset_,
@@ -713,7 +644,7 @@ int THTensor_(isSize)(const THTensor *self, const THLongStorage *dims)
 
   for(d = 0; d < self->nDimension; ++d)
   {
-    if(self->size[d] != dims->data[d])
+    if(self->size[d] != THLongStorage_data(dims)[d])
       return 0;
   }
   return 1;
@@ -768,7 +699,7 @@ ptrdiff_t THTensor_(nElement)(const THTensor *self)
 void THTensor_(retain)(THTensor *self)
 {
   if(self->flag & TH_TENSOR_REFCOUNTED)
-    THAtomicIncrementRef(&self->refcount);
+    ++self->refcount;
 }
 
 void THTensor_(free)(THTensor *self)
@@ -778,12 +709,13 @@ void THTensor_(free)(THTensor *self)
 
   if(self->flag & TH_TENSOR_REFCOUNTED)
   {
-    if(THAtomicDecrementRef(&self->refcount))
+    if(--self->refcount == 0)
     {
       THFree(self->size);
       THFree(self->stride);
       if(self->storage)
         THStorage_(free)(self->storage);
+      self->refcount.~atomic<int>();
       THFree(self);
     }
   }
@@ -801,7 +733,7 @@ void THTensor_(freeCopyTo)(THTensor *self, THTensor *dst)
 
 static void THTensor_(rawInit)(THTensor *self)
 {
-  self->refcount = 1;
+  new (&self->refcount) std::atomic<int>(1);
   self->storage = THStorage_(new)();
   self->storageOffset = 0;
   self->size = NULL;

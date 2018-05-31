@@ -96,13 +96,6 @@
     output: self_->isScalar()
     buffer: self_->isScalar()
 
-- name: log_softmax(Tensor self, int64_t dim)
-  cname: LogSoftMax
-  wrap_dim:
-    dim: self
-  scalar_check:
-    output: self_->isScalar()
-
 - name: prelu(Tensor self, Tensor weight)
   cname: PReLU
   scalar_check:
@@ -113,13 +106,6 @@
 - name: rrelu_with_noise(Tensor self, Tensor noise, Scalar lower=0.125, Scalar upper=0.3333333333333333, bool training=false, Generator* generator=nullptr)
   cname: RReLU
   has_inplace: True
-  scalar_check:
-    output: self_->isScalar()
-
-- name: softmax(Tensor self, int64_t dim)
-  cname: SoftMax
-  wrap_dim:
-    dim: self
   scalar_check:
     output: self_->isScalar()
 
@@ -206,17 +192,17 @@
 # Note: The upsampling backwards functions also include an IntList input_size
 # parameter, which is added by nn_parse.py
 
-- name: upsample_linear1d(Tensor self, IntList[1] output_size)
+- name: upsample_linear1d(Tensor self, IntList[1] output_size, bool align_corners)
   cname: TemporalUpSamplingLinear
   scalar_check:
     grad_input: 'false'
 
-- name: upsample_bilinear2d(Tensor self, IntList[2] output_size)
+- name: upsample_bilinear2d(Tensor self, IntList[2] output_size, bool align_corners)
   cname: SpatialUpSamplingBilinear
   scalar_check:
     grad_input: 'false'
 
-- name: upsample_trilinear3d(Tensor self, IntList[3] output_size)
+- name: upsample_trilinear3d(Tensor self, IntList[3] output_size, bool align_corners)
   cname: VolumetricUpSamplingTrilinear
   scalar_check:
     grad_input: 'false'

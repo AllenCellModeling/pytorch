@@ -1,6 +1,6 @@
 #pragma once
 
-#include <Python.h>
+#include "torch/csrc/python_headers.h"
 
 #include "torch/csrc/autograd/function.h"
 #include "torch/csrc/autograd/engine.h"
@@ -18,8 +18,6 @@ struct PythonEngine : public Engine {
       bool keep_graph,
       bool create_graph,
       const edge_list& outputs = {}) override;
-
-  static PythonEngine& getDefaultEngine();
 };
 
 }}} // namespace torch::autograd::python

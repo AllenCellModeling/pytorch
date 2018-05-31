@@ -4,19 +4,7 @@
 
 #define TH_TENSOR_REFCOUNTED 1
 
-typedef struct THCTensor
-{
-    int64_t *size;
-    int64_t *stride;
-    int nDimension;
-
-    THCStorage *storage;
-    ptrdiff_t storageOffset;
-    int refcount;
-
-    char flag;
-
-} THCTensor;
+typedef struct THCTensor THCTensor;
 
 
 /**** access methods ****/
@@ -68,10 +56,6 @@ THC_API THCTensor *THCTensor_(newTranspose)(THCState *state, THCTensor *tensor, 
 THC_API THCTensor *THCTensor_(newUnfold)(THCState *state, THCTensor *tensor, int dimension_, int64_t size_, int64_t step_);
 THC_API THCTensor *THCTensor_(newView)(THCState *state, THCTensor *tensor, THLongStorage *size);
 THC_API THCTensor *THCTensor_(newFoldBatchDim)(THCState *state, THCTensor *input);
-THC_API THCTensor *THCTensor_(newExpand)(THCState *state, THCTensor *tensor, THLongStorage *size);
-
-THC_API void THCTensor_(expand)(THCState *state, THCTensor *r, THCTensor *tensor, THLongStorage *sizes);
-THC_API void THCTensor_(expandNd)(THCState *state, THCTensor **rets, THCTensor **ops, int count);
 
 // resize* methods simply resize the storage. So they may not retain the current data at current indices.
 // This is especially likely to happen when the tensor is not contiguous. In general, if you still need the
@@ -134,7 +118,6 @@ THC_API real THCTensor_(get3d)(THCState *state, const THCTensor *tensor, int64_t
 THC_API real THCTensor_(get4d)(THCState *state, const THCTensor *tensor, int64_t x0, int64_t x1, int64_t x2, int64_t x3);
 
 /* CUDA-specific functions */
-THC_API cudaTextureObject_t THCTensor_(getTextureObject)(THCState *state, THCTensor *self);
 THC_API int THCTensor_(getDevice)(THCState *state, const THCTensor *self);
 THC_API int THCTensor_(checkGPU)(THCState *state, unsigned int nTensors, ...);
 

@@ -3,26 +3,30 @@
 // Engine implements backpropagation from output variables and their gradients
 // to "root" variables (variables created by the user with requires_grad=True).
 
-#include <Python.h>
+#include "torch/csrc/autograd/function.h"
+#include "torch/csrc/autograd/input_buffer.h"
+
 #include <deque>
+#include <exception>
+#include <functional>
 #include <memory>
 #include <unordered_map>
 #include <utility>
 #include <vector>
-#include <functional>
-
-#include "torch/csrc/autograd/function.h"
-#include "torch/csrc/autograd/input_buffer.h"
 
 namespace torch { namespace autograd {
-
 struct ReadyQueue;
 struct FunctionTask;
 struct GraphTask;
+}} // namespace torch::autograd
 
+namespace torch { namespace autograd {
 // A single instance of this struct should be created through the whole process lifetime.
 // The worker thread creation logic and Engine's destructor rely on this.
 struct Engine {
+  /// Returns a reference to a static `Engine` instance.
+  static Engine& get_default_engine();
+
   Engine();
   virtual ~Engine();
 
@@ -39,6 +43,8 @@ struct Engine {
       const edge_list& outputs = {});
 
   void queue_callback(std::function<void()> callback);
+
+  bool is_checkpoint_valid();
 
 protected:
   void compute_dependencies(Function* root, GraphTask& task);

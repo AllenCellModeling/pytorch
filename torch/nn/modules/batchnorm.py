@@ -25,47 +25,80 @@ class _BatchNorm(Module):
         if self.track_running_stats:
             self.register_buffer('running_mean', torch.zeros(num_features))
             self.register_buffer('running_var', torch.ones(num_features))
+            self.register_buffer('num_batches_tracked', torch.tensor(0, dtype=torch.long))
         else:
             self.register_parameter('running_mean', None)
             self.register_parameter('running_var', None)
+            self.register_parameter('num_batches_tracked', None)
         self.reset_parameters()
 
-    def reset_parameters(self):
+    def reset_running_stats(self):
         if self.track_running_stats:
             self.running_mean.zero_()
             self.running_var.fill_(1)
+            self.num_batches_tracked.zero_()
+
+    def reset_parameters(self):
+        self.reset_running_stats()
         if self.affine:
             self.weight.data.uniform_()
             self.bias.data.zero_()
 
     def _check_input_dim(self, input):
-        return NotImplemented
+        raise NotImplementedError
 
     def forward(self, input):
         self._check_input_dim(input)
 
+        exponential_average_factor = 0.0
+
+        if self.training and self.track_running_stats:
+            self.num_batches_tracked += 1
+            if self.momentum is None:  # use cumulative moving average
+                exponential_average_factor = 1.0 / self.num_batches_tracked.item()
+            else:  # use exponential moving average
+                exponential_average_factor = self.momentum
+
         return F.batch_norm(
             input, self.running_mean, self.running_var, self.weight, self.bias,
-            self.training or not self.track_running_stats, self.momentum, self.eps)
+            self.training or not self.track_running_stats,
+            exponential_average_factor, self.eps)
 
-    def __repr__(self):
-        return ('{name}({num_features}, eps={eps}, momentum={momentum},'
-                ' affine={affine}, track_running_stats={track_running_stats})'
-                .format(name=self.__class__.__name__, **self.__dict__))
+    def extra_repr(self):
+        return '{num_features}, eps={eps}, momentum={momentum}, affine={affine}, ' \
+               'track_running_stats={track_running_stats}'.format(**self.__dict__)
+
+    def _load_from_state_dict(self,
+                              state_dict, prefix, strict,
+                              missing_keys, unexpected_keys, error_msgs):
+        try:
+            version = state_dict._metadata[prefix[:-1]]['version']
+        except (AttributeError, KeyError):
+            version = None
+
+        if version is None and self.track_running_stats:
+            num_batches_tracked_key = prefix + 'num_batches_tracked'
+            if num_batches_tracked_key not in state_dict:
+                # Add the missing num_batches_tracked counter
+                state_dict[num_batches_tracked_key] = torch.tensor(0, dtype=torch.long)
+
+        super(_BatchNorm, self)._load_from_state_dict(
+            state_dict, prefix, strict,
+            missing_keys, unexpected_keys, error_msgs)
 
 
 class BatchNorm1d(_BatchNorm):
-    r"""Applies Batch Normalization over a 2d or 3d input (a mini-batch of 1d
+    r"""Applies Batch Normalization over a 2D or 3D input (a mini-batch of 1D
     inputs with optional additional channel dimension) as described in the paper
     `Batch Normalization: Accelerating Deep Network Training by Reducing Internal Covariate Shift`_ .
 
     .. math::
 
-        y = \frac{x - mean[x]}{ \sqrt{Var[x] + \epsilon}} * gamma + beta
+        y = \frac{x - \mathrm{E}[x]}{\sqrt{\mathrm{Var}[x] + \epsilon}} * \gamma + \beta
 
     The mean and standard-deviation are calculated per-dimension over
-    the mini-batches and gamma and beta are learnable parameter vectors
-    of size C (where C is the input size).
+    the mini-batches and :math:`\gamma` and :math:`\beta` are learnable parameter vectors
+    of size `C` (where `C` is the input size).
 
     By default, during training this layer keeps running estimates of its
     computed mean and variance, which are then used for normalization during
@@ -80,12 +113,12 @@ class BatchNorm1d(_BatchNorm):
         This :attr:`momentum` argument is different from one used in optimizer
         classes and the conventional notion of momentum. Mathematically, the
         update rule for running statistics here is
-        :math:`\hat{x}_\text{new} = (1 - \text{momentum}) \times \hat{x}_\text{new} + \text{momemtum} \times x_t`,
+        :math:`\hat{x}_\text{new} = (1 - \text{momentum}) \times \hat{x} + \text{momemtum} \times x_t`,
         where :math:`\hat{x}` is the estimated statistic and :math:`x_t` is the
         new observed value.
 
-    Because the BatchNorm is done over the `C` dimension, computing statistics
-    on `(N, L)` slices, it's common terminology to call this Temporal BatchNorm.
+    Because the Batch Normalization is done over the `C` dimension, computing statistics
+    on `(N, L)` slices, it's common terminology to call this Temporal Batch Normalization.
 
     Args:
         num_features: :math:`C` from an expected input of size
@@ -93,7 +126,8 @@ class BatchNorm1d(_BatchNorm):
         eps: a value added to the denominator for numerical stability.
             Default: 1e-5
         momentum: the value used for the running_mean and running_var
-            computation. Default: 0.1
+            computation. Can be set to ``None`` for cumulative moving average
+            (i.e. simple average). Default: 0.1
         affine: a boolean value that when set to ``True``, this module has
             learnable affine parameters. Default: ``True``
         track_running_stats: a boolean value that when set to ``True``, this
@@ -105,7 +139,8 @@ class BatchNorm1d(_BatchNorm):
         - Input: :math:`(N, C)` or :math:`(N, C, L)`
         - Output: :math:`(N, C)` or :math:`(N, C, L)` (same shape as input)
 
-    Examples:
+    Examples::
+
         >>> # With Learnable Parameters
         >>> m = nn.BatchNorm1d(100)
         >>> # Without Learnable Parameters
@@ -124,17 +159,17 @@ class BatchNorm1d(_BatchNorm):
 
 
 class BatchNorm2d(_BatchNorm):
-    r"""Applies Batch Normalization over a 4d input (a mini-batch of 2d inputs
+    r"""Applies Batch Normalization over a 4D input (a mini-batch of 2D inputs
     with additional channel dimension) as described in the paper
     `Batch Normalization: Accelerating Deep Network Training by Reducing Internal Covariate Shift`_ .
 
     .. math::
 
-        y = \frac{x - mean[x]}{ \sqrt{Var[x] + \epsilon}} * gamma + beta
+        y = \frac{x - \mathrm{E}[x]}{ \sqrt{\mathrm{Var}[x] + \epsilon}} * \gamma + \beta
 
     The mean and standard-deviation are calculated per-dimension over
-    the mini-batches and gamma and beta are learnable parameter vectors
-    of size C (where C is the input size).
+    the mini-batches and :math:`\gamma` and :math:`\beta` are learnable parameter vectors
+    of size `C` (where `C` is the input size).
 
     By default, during training this layer keeps running estimates of its
     computed mean and variance, which are then used for normalization during
@@ -149,12 +184,12 @@ class BatchNorm2d(_BatchNorm):
         This :attr:`momentum` argument is different from one used in optimizer
         classes and the conventional notion of momentum. Mathematically, the
         update rule for running statistics here is
-        :math:`\hat{x}_\text{new} = (1 - \text{momentum}) \times \hat{x}_\text{new} + \text{momemtum} \times x_t`,
+        :math:`\hat{x}_\text{new} = (1 - \text{momentum}) \times \hat{x} + \text{momemtum} \times x_t`,
         where :math:`\hat{x}` is the estimated statistic and :math:`x_t` is the
         new observed value.
 
-    Because the BatchNorm is done over the `C` dimension, computing statistics
-    on `(N, H, W)` slices, it's common terminology to call this Spatial BatchNorm.
+    Because the Batch Normalization is done over the `C` dimension, computing statistics
+    on `(N, H, W)` slices, it's common terminology to call this Spatial Batch Normalization.
 
     Args:
         num_features: :math:`C` from an expected input of size
@@ -162,7 +197,8 @@ class BatchNorm2d(_BatchNorm):
         eps: a value added to the denominator for numerical stability.
             Default: 1e-5
         momentum: the value used for the running_mean and running_var
-            computation. Default: 0.1
+            computation. Can be set to ``None`` for cumulative moving average
+            (i.e. simple average). Default: 0.1
         affine: a boolean value that when set to ``True``, this module has
             learnable affine parameters. Default: ``True``
         track_running_stats: a boolean value that when set to ``True``, this
@@ -174,7 +210,8 @@ class BatchNorm2d(_BatchNorm):
         - Input: :math:`(N, C, H, W)`
         - Output: :math:`(N, C, H, W)` (same shape as input)
 
-    Examples:
+    Examples::
+
         >>> # With Learnable Parameters
         >>> m = nn.BatchNorm2d(100)
         >>> # Without Learnable Parameters
@@ -193,17 +230,17 @@ class BatchNorm2d(_BatchNorm):
 
 
 class BatchNorm3d(_BatchNorm):
-    r"""Applies Batch Normalization over a 5d input (a mini-batch of 3d inputs
+    r"""Applies Batch Normalization over a 5D input (a mini-batch of 3D inputs
     with additional channel dimension) as described in the paper
     `Batch Normalization: Accelerating Deep Network Training by Reducing Internal Covariate Shift`_ .
 
     .. math::
 
-        y = \frac{x - mean[x]}{ \sqrt{Var[x] + \epsilon}} * gamma + beta
+        y = \frac{x - \mathrm{E}[x]}{ \sqrt{\mathrm{Var}[x] + \epsilon}} * \gamma + \beta
 
     The mean and standard-deviation are calculated per-dimension over
-    the mini-batches and gamma and beta are learnable parameter vectors
-    of size C (where C is the input size).
+    the mini-batches and :math:`\gamma` and :math:`\beta` are learnable parameter vectors
+    of size `C` (where `C` is the input size).
 
     By default, during training this layer keeps running estimates of its
     computed mean and variance, which are then used for normalization during
@@ -218,13 +255,13 @@ class BatchNorm3d(_BatchNorm):
         This :attr:`momentum` argument is different from one used in optimizer
         classes and the conventional notion of momentum. Mathematically, the
         update rule for running statistics here is
-        :math:`\hat{x}_\text{new} = (1 - \text{momentum}) \times \hat{x}_\text{new} + \text{momemtum} \times x_t`,
+        :math:`\hat{x}_\text{new} = (1 - \text{momentum}) \times \hat{x} + \text{momemtum} \times x_t`,
         where :math:`\hat{x}` is the estimated statistic and :math:`x_t` is the
         new observed value.
 
-    Because the BatchNorm is done over the `C` dimension, computing statistics
-    on `(N, D, H, W)` slices, it's common terminology to call this Volumetric BatchNorm
-    or Spatio-temporal BatchNorm.
+    Because the Batch Normalization is done over the `C` dimension, computing statistics
+    on `(N, D, H, W)` slices, it's common terminology to call this Volumetric Batch Normalization
+    or Spatio-temporal Batch Normalization.
 
     Args:
         num_features: :math:`C` from an expected input of size
@@ -232,7 +269,8 @@ class BatchNorm3d(_BatchNorm):
         eps: a value added to the denominator for numerical stability.
             Default: 1e-5
         momentum: the value used for the running_mean and running_var
-            computation. Default: 0.1
+            computation. Can be set to ``None`` for cumulative moving average
+            (i.e. simple average). Default: 0.1
         affine: a boolean value that when set to ``True``, this module has
             learnable affine parameters. Default: ``True``
         track_running_stats: a boolean value that when set to ``True``, this
@@ -244,7 +282,8 @@ class BatchNorm3d(_BatchNorm):
         - Input: :math:`(N, C, D, H, W)`
         - Output: :math:`(N, C, D, H, W)` (same shape as input)
 
-    Examples:
+    Examples::
+
         >>> # With Learnable Parameters
         >>> m = nn.BatchNorm3d(100)
         >>> # Without Learnable Parameters

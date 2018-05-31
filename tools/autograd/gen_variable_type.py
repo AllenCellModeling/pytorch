@@ -25,7 +25,7 @@
 from __future__ import print_function
 import os
 import sys
-from .utils import CodeTemplate, nested_dict, write
+from .utils import CodeTemplate, nested_dict, write, uninplace_api_name
 from .gen_autograd import VIEW_FUNCTIONS, template_path, \
     HARDCODED_DIFFERENTIABLE_OUTPUTS
 from .gen_autograd_functions import uses_single_grad
@@ -70,11 +70,11 @@ DONT_REQUIRE_DERIVATIVE = {
 }
 
 METHOD_DECLARATION = CodeTemplate("""\
-virtual ${return_type} ${method_prefix_derived}${api_name}(${formals}) const override;
+virtual ${return_type} ${method_prefix_derived}${api_name}(${type_method_formals}) const override;
 """)
 
 METHOD_DEFINITION = CodeTemplate("""\
-${return_type} VariableType::${method_prefix_derived}${api_name}(${formals}) const {
+${return_type} VariableType::${method_prefix_derived}${api_name}(${type_method_formals}) const {
   ${type_definition_body}
 }
 """)
@@ -93,12 +93,12 @@ if (compute_requires_grad( ${args_with_derivatives} )) {
 """)
 
 ASSIGN_GRAD_FN = CodeTemplate("""\
-grad_fn = std::make_shared<${op}>(${op_ctor});
+grad_fn = std::shared_ptr<${op}>(new ${op}(${op_ctor}), deleteFunction);
 grad_fn->set_next_edges(collect_next_edges( ${args_with_derivatives} ));
 """)
 
 CALL_VIA_TYPE = CodeTemplate("""\
-Type::${method_prefix_derived}${api_name}(${args})""")
+Type::${method_prefix_derived}${api_name}(${type_method_args})""")
 
 CALL_VIA_DERIVED = CodeTemplate("""\
 baseType->${method_prefix_derived}${base_name}(${unpacked_args})""")
@@ -119,8 +119,13 @@ profiler::RecordFunction profiler("${name}");""")
 PRE_RECORD_TRACE = CodeTemplate("""\
 jit::tracer::PreTraceInfo trace_info;
 if (jit::tracer::isTracing( ${tensor_args} )) {
-  trace_info = jit::tracer::preRecordTrace( "${trace_name}", ${trace_inputs} );
-  ${record_attributes}
+  trace_info = jit::tracer::preRecordTrace( jit::aten::${trace_name}, ${trace_inputs} );
+  if (!jit::tracer::ArgumentStash::empty()) {
+    ${record_positional_attributes}
+    TORCH_ASSERT(jit::tracer::ArgumentStash::empty());
+  } else {
+    ${record_attributes}
+  }
 }
 """)
 
@@ -131,7 +136,34 @@ if (trace_info.state != nullptr) {
 """)
 
 RECORD_ATTRIBUTE = CodeTemplate("""\
-setattr(trace_info.n, jit::Symbol("${name}"), ${name});""")
+setattr(trace_info.n, jit::attr::${name}, ${name});""")
+
+RECORD_POSITIONAL_ATTRIBUTE = CodeTemplate("""\
+setposattr(trace_info.n, ${i}, "${name}", ${name});""")
+
+POSITIONAL_ATTR_NYI = """\
+throw std::runtime_error("Can't have size-dependent arguments to functions that "
+                         "take variable number of tensor arguments");
+"""
+
+
+def should_trace(declaration):
+    # Operations involving Generator, Storage, Type are not traceable
+    # at the moment
+    if any(arg['simple_type'] in {'Generator', 'Storage', 'ScalarType', 'Type', 'optional<ScalarType>'}
+            for arg in declaration['arguments']):
+        return False
+    # We can't trace functions which don't have any Tensor or TensorList returns
+    if 'Tensor' not in declaration['return_type']:
+        return False
+    tensor_args = [arg for arg in declaration['arguments'] if arg['simple_type'] in {'Tensor', 'TensorList'}]
+    if len(tensor_args) == 0:
+        return False
+    name = declaration['name']
+    base_name = name[:-1] if declaration['inplace'] else name[:-4] if name.endswith('_out') else name
+    if base_name in DONT_RECORD_TRACE:
+        return False
+    return True
 
 
 def gen_variable_type(out, aten_declarations):
@@ -316,17 +348,7 @@ def emit_body(declaration):
             return CodeTemplate("{ ${outs} }").substitute(outs=trace_outs)
 
     def emit_record_trace(env):
-        # Operations involving Generator, Storage, Type are not traceable
-        # at the moment
-        if any(arg['simple_type'] in {'Generator', 'Storage', 'Type'} for arg in declaration['arguments']):
-            return ('', '')
-        # We can't trace functions which don't have any Tensor or TensorList returns
-        if 'Tensor' not in declaration['return_type']:
-            return ('', '')
-        tensor_args = [arg for arg in arguments if arg['simple_type'] in {'Tensor', 'TensorList'}]
-        if len(tensor_args) == 0:
-            return ('', '')
-        if base_name in DONT_RECORD_TRACE:
+        if not should_trace(declaration):
             return ('', '')
 
         # Note [clang-802.0.42 tuple overload bug]
@@ -354,6 +376,7 @@ def emit_body(declaration):
 
         local = {}
 
+        tensor_args = [arg for arg in declaration['arguments'] if arg['simple_type'] in {'Tensor', 'TensorList'}]
         local['tensor_args'] = [arg['name'] for arg in tensor_args]
         if any(arg['simple_type'] == 'TensorList' for arg in tensor_args):
             # Allocate a temporary vector with flatten and pass it in
@@ -367,9 +390,21 @@ def emit_body(declaration):
                 continue
             local['record_attributes'].append(RECORD_ATTRIBUTE.substitute(name=arg['name']))
 
-        local['trace_name'] = declaration['api_name']
-        if local['trace_name'].endswith('_'):
-            local['trace_name'] = local['trace_name'][:-1]
+        local['record_positional_attributes'] = []
+        for i, arg in enumerate(declaration['arguments']):
+            if arg['simple_type'] == 'Tensor':
+                continue
+            if arg['simple_type'] == 'TensorList':
+                local['record_positional_attributes'] = POSITIONAL_ATTR_NYI
+                break
+            local['record_positional_attributes'].append(
+                RECORD_POSITIONAL_ATTRIBUTE.substitute(name=arg['name'], i=i))
+
+        # Record inplace operations as out-of-place operations (e.g.,
+        # not add_ but add)
+        # TODO: Add a proper concept of side effects to the IR, and
+        # properly record inplace operations.
+        local['trace_name'] = uninplace_api_name(declaration['api_name'])
 
         local['trace_outputs'] = get_trace_outputs(declaration)
 
@@ -430,10 +465,8 @@ def emit_body(declaration):
     def emit_history():
         fn = 'rebase' if modifies_arguments and not is_view else 'set'
         output_names = [r['name'] for r in differentiable_outputs]
-        if len(output_names) == 1:
-            outs = output_names[0]
-        else:
-            outs = CodeTemplate("{ ${outs} }").substitute(outs=output_names)
+        # TODO: flatten allocates a std::vector, which could be expensive
+        outs = CodeTemplate("flatten( ${outs} )").substitute(outs=output_names)
         return SET_HISTORY.substitute(fn=fn, differentiable_outputs=outs)
 
     def emit_save_outputs():
@@ -496,6 +529,9 @@ def unpack_args(env, declaration):
     body = []
     unpacked_args = []
     for i, arg in enumerate(declaration['arguments']):
+        # these arguments are skipped from the Type method.
+        if arg.get('is_type_dispatched'):
+            continue
         if not requires_unpack(arg):
             unpacked_args.append(arg['name'])
             continue
@@ -537,14 +573,22 @@ def dispatch_strategy(declaration):
           get dispatched back to VariableType (which will ensure that they
           are differentiable.)
     """
-    if declaration['abstract'] or declaration['derivative'] is not None:
+    if (declaration['abstract'] or declaration['derivative'] is not None or
+            any(arg.get('is_type_dispatched') for arg in declaration['arguments'])):
         # If the function is abstract (not implemented on at::Type), we must
         # call the implementation on the derived type with unpacked tensors.
+
         # If the function has a derivative specified and is concrete, we could
         # call either implementation. We prefer the calling the derived
         # type's implementation with unpacked tensors because it is more
         # performant in some cases: any internal calls to other ATen functions
         # won't have the history tracked.
+
+        # If the function has a type dispatched argument (i.e. is a factory),
+        # we prefer calling the derived type's implementation both because it is
+        # more performant and to ensure factory functions return tensors with _version
+        # of 0 (probably not strictly necessary, but nice to have to keeps versions simple
+        # to understand.
         return 'use_derived'
     else:
         # If the function is concrete (we don't have to override it) and we

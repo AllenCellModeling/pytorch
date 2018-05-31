@@ -7,7 +7,7 @@
 
 #include <curand_kernel.h>
 
-#define MAX_NUM_BLOCKS 64
+#define MAX_NUM_BLOCKS 200 
 #define BLOCK_SIZE 256
 /* Separate kernel because curand_log_normal gets extra parameters. */
 
@@ -104,7 +104,7 @@ __global__ void renormRowsL1(T* dist, long rows, long cols) {
       sum = THCNumerics<T>::add(sum, val);
     }
 
-    sum = reduceBlock(smem, blockDim.x, sum, ReduceAdd<T, T>(), zero);
+    sum = reduceBlock(smem, blockDim.x, sum, ReduceAdd<T>(), zero);
     if (threadIdx.x == 0) {
       assert(THCNumerics<T>::gt(sum, zero));
       smem[0] = sum;
@@ -140,8 +140,11 @@ __device__ int binarySearchForMultinomial(T* dist,
 
   if (start == size) {
     // No probability mass or precision problems; just return the
-    // first element
-    start = 0;
+    // first non-zero element by setting start to size-1 here,
+    // the code below will move it to the last non-zero probability
+    // this actually can happen when the random number is 1
+    // (github pytorch issue #4858).
+    start = size - 1;
   }
 
   T curVal = dist[start];
@@ -184,7 +187,7 @@ sampleMultinomialOnce(int64_t* dest,
     }
 
     // threadIdx.x == 0 has the sum value from this
-    sum = reduceBlock(asmem, blockDim.x, sum, ReduceAdd<AccT, AccT>(), accZero);
+    sum = reduceBlock(asmem, blockDim.x, sum, ReduceAdd<AccT>(), accZero);
 
     // Broadcast sum and sample value
     if (threadIdx.x == 0) {
